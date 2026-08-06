@@ -1,0 +1,9 @@
+{
+  "images" : [
+    { "filename" : "logo.apple-music.png", "idiom" : "universal", "scale" : "1x" },
+    { "filename" : "logo.apple-music@2x.png", "idiom" : "universal", "scale" : "2x" },
+    { "filename" : "logo.apple-music@3x.png", "idiom" : "universal", "scale" : "3x" }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 },
+  "properties" : {  "preserves-vector-representation" : false }
+}

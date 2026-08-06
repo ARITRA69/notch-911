@@ -1,0 +1,59 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# Xcode — build products
+build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Xcode — user-specific state
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.perspectivev3
+*.mode1v3
+*.mode2v3
+*.pbxuser
+
+# Xcode — the project's own generated cruft
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+*.xcworkspace/xcuserdata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Test output
+*.xcresult/
+TestResults/
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Signing — never commit key material.
+# The local development identity is generated per-machine by
+# scripts/install-local-signing-identity.sh; it is not shared.
+*.p12
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.certSigningRequest
+notch-911.entitlements.local
+
+# Local tooling / agent state
+.claude/settings.local.json
+.codex/
