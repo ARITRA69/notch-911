@@ -1,6 +1,26 @@
+<div align="center">
+
+<img src="docs/images/app-icon.png" width="132" alt="notch-911 app icon">
+
 # notch-911
 
 **Answer your coding agents from the MacBook notch.**
+
+<img src="docs/images/logo-claude.png" width="26" alt="Claude">
+&nbsp;&nbsp;
+<img src="docs/images/logo-openai.png" width="26" alt="Codex">
+&nbsp;&nbsp;
+<img src="docs/images/logo-spotify.png" width="26" alt="Spotify">
+&nbsp;&nbsp;
+<img src="docs/images/logo-apple-music.png" width="26" alt="Apple Music">
+&nbsp;&nbsp;
+<img src="docs/images/logo-youtube-music.png" width="26" alt="YouTube Music">
+
+macOS 14+ &nbsp;·&nbsp; Swift 6 &nbsp;·&nbsp; SwiftUI + AppKit
+
+</div>
+
+---
 
 Claude Code and Codex both stop and wait for you — for permission, for a choice,
 for a plan-mode answer. notch-911 puts those prompts in the notch, so you answer
@@ -8,7 +28,9 @@ them without leaving the window you were already in. While nothing is asking,
 the same surface shows what's playing and holds a shelf of files you're moving
 between apps.
 
-macOS 14+ · Swift 6 · SwiftUI + AppKit
+<div align="center">
+  <img src="docs/images/hero-macbook.png" width="760" alt="notch-911 running on a MacBook Pro: a prompt hanging from the notch with the status window behind it">
+</div>
 
 ---
 
@@ -29,6 +51,13 @@ supported, covering everything the two agents can actually put in front of you:
 The panel takes keystrokes without stealing focus and floats above fullscreen
 apps, so answering never switches your active window.
 
+<div align="center">
+  <img src="docs/images/multiple-choice-form.png" width="600" alt="An Elicitation form in the notch: a single-select Deploy target group and a multi-select Pre-deploy checks group, each option bound to a Command-number shortcut">
+  <br>
+  <sub>An <code>Elicitation</code> form — one single-select group, one
+  multi-select group, every option on its own Command-number shortcut.</sub>
+</div>
+
 ### Direct Codex answers
 
 Codex plan-mode questions aren't hooks — they're App Server calls. notch-911
@@ -46,8 +75,12 @@ in **System Settings → Privacy & Security → Accessibility**.
 
 ### Now playing
 
-Transport controls and artwork for **Music.app**, **Spotify** and **YouTube
-Music**.
+<img src="docs/images/logo-apple-music.png" width="16" alt="Music.app">
+&nbsp;·&nbsp;
+<img src="docs/images/logo-spotify.png" width="16" alt="Spotify">
+&nbsp;·&nbsp;
+<img src="docs/images/logo-youtube-music.png" width="16" alt="YouTube Music">
+&nbsp;— artwork and transport controls.
 
 This is deliberately not a general "whatever is playing" reader. Since macOS
 15.4, `mediaremoted` gates now-playing behind an entitlement third-party apps
@@ -67,6 +100,24 @@ Dropped files are **copied** into Application Support rather than referenced. A
 shelf of references breaks the moment the original is moved or cleaned up, and
 drags out of browsers and Mail hand over temp files that vanish almost
 immediately.
+
+<div align="center">
+  <img src="docs/images/notch-media-shelf.png" width="660" alt="The expanded notch with Spotify playing on the left and the file shelf on the right">
+  <br>
+  <sub>Nothing waiting on you: now playing on the left, the shelf on the right,
+  both agents connected.</sub>
+</div>
+
+---
+
+## The status window
+
+Server state, which hooks are registered, and everything that has come through.
+Closing it doesn't quit the app — it stays running as a background listener.
+
+<div align="center">
+  <img src="docs/images/status-window.png" width="560" alt="notch-911 status window showing hook server, Claude Code hook, Codex hook and Accessibility state">
+</div>
 
 ---
 
@@ -151,9 +202,6 @@ signing identity, so ad-hoc rebuilds would silently drop the grant every time.
 | **Automation** (Apple Events) | Read and control Music.app / Spotify | First now-playing use |
 | **Automation** (browser) | Read YouTube Music via `navigator.mediaSession` | Off by default |
 
-Closing the status window doesn't quit the app — it stays running as a
-background listener.
-
 ---
 
 ## Verification
@@ -196,6 +244,7 @@ notch-911/
   CodeSignatureInspector.swift     Signing diagnostics
 notch-911Tests/                    Five suites
 scripts/                           Signing identity, installer, icon generator
+docs/images/                       README assets
 ```
 
 ---
@@ -206,3 +255,10 @@ scripts/                           Signing identity, installer, icon generator
   only. `Stop` is the one place Codex takes free text back.
 - The Electron *YouTube Music Desktop* build isn't scriptable and isn't covered.
 - On a Mac with no notch, the panel falls back to the top edge of the screen.
+
+---
+
+<div align="center">
+<sub>Service marks belong to their respective owners and are used to identify the
+apps notch-911 talks to.</sub>
+</div>
