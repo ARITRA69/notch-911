@@ -88,16 +88,25 @@ enum NotchGeometry {
 @MainActor
 final class NotchPanelController {
 
-    /// Fixed at the maximum expanded bounds. Sized for the tallest surface we
-    /// can present — a multi-field elicitation form — not the smallest.
-    private static let panelSize = CGSize(width: 720, height: 620)
+    /// Fixed at the maximum expanded bounds. Width is set by the widest surface
+    /// and height by the tallest, and since the clipboard arrived that is no
+    /// longer the multi-field elicitation form — it's the peek with a focused
+    /// fifteen-row clipboard. The window clips anything past this, so a content
+    /// height the layout is perfectly happy to produce would simply disappear
+    /// below the bottom edge.
+    private static let panelSize = CGSize(width: 900, height: 800)
 
     private let panel: NotchPanel
     private let sensor: HoverSensorPanel
     private let coordinator: PromptCoordinator
     private let media: MediaMonitor
 
-    init(coordinator: PromptCoordinator, media: MediaMonitor, shelf: ShelfStore) {
+    init(
+        coordinator: PromptCoordinator,
+        media: MediaMonitor,
+        shelf: ShelfStore,
+        clipboard: ClipboardStore
+    ) {
         self.coordinator = coordinator
         self.media = media
 
@@ -143,7 +152,14 @@ final class NotchPanelController {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
 
-        let hosting = NSHostingView(rootView: NotchPromptView(coordinator: coordinator, media: media, shelf: shelf))
+        let hosting = NSHostingView(
+            rootView: NotchPromptView(
+                coordinator: coordinator,
+                media: media,
+                shelf: shelf,
+                clipboard: clipboard
+            )
+        )
         hosting.frame = CGRect(origin: .zero, size: Self.panelSize)
         panel.contentView = hosting
 
@@ -174,7 +190,7 @@ final class NotchPanelController {
         }
         reposition()
         // The panel now stays on screen for the collapsed mini player, so it has
-        // to stop swallowing clicks across its whole 720×620 frame when there is
+        // to stop swallowing clicks across its whole fixed frame when there is
         // nothing interactive in it.
         panel.ignoresMouseEvents = !(coordinator.current != nil || coordinator.isPeeking)
         if coordinator.current != nil {
@@ -304,6 +320,7 @@ struct NotchPromptView: View {
     let coordinator: PromptCoordinator
     let media: MediaMonitor
     let shelf: ShelfStore
+    let clipboard: ClipboardStore
 
     /// What the surface is rendering. Held in view state rather than read
     /// straight from the coordinator so the content outlives the collapse:
@@ -322,8 +339,11 @@ struct NotchPromptView: View {
 
     private static let flare: CGFloat = 12
     private static let promptWidth: CGFloat = 520
-    // Three columns: 56pt cover + centre + the shelf's fixed 136pt.
-    private static let peekWidth: CGFloat = 540
+    // Four columns: 56pt cover + centre + the clipboard's 176pt + the shelf's
+    // 136pt, with 16pt gutters. Held constant while the side columns trade width
+    // between themselves on hover — the surface itself must not breathe in and
+    // out as the pointer crosses it, or reading a row becomes a moving target.
+    private static let peekWidth: CGFloat = 732
     /// Roughly the physical notch's own bottom corner radius.
     private static let notchBottomRadius: CGFloat = 10
     private static let openBottomRadius: CGFloat = 22
@@ -483,7 +503,7 @@ struct NotchPromptView: View {
                     // bleeding the last answer into the next question.
                     .id(prompt.id)
             } else if shownPeek {
-                PeekCard(coordinator: coordinator, media: media, shelf: shelf)
+                PeekCard(coordinator: coordinator, media: media, shelf: shelf, clipboard: clipboard)
             }
         }
         .padding(.top, NotchGeometry.topInset + 8)   // clears the camera housing
@@ -570,10 +590,45 @@ struct PeekCard: View {
     let coordinator: PromptCoordinator
     let media: MediaMonitor
     let shelf: ShelfStore
+    let clipboard: ClipboardStore
+
+    /// Which of the two side columns has the pointer. Held here rather than in
+    /// each column because the whole behaviour is relational: three columns of
+    /// roughly equal width are three things you have to read one at a time, so
+    /// the focused one takes room and the others give it up.
+    private enum Column { case clipboard, shelf }
+
+    @State private var focus: Column?
 
     /// Left column is exactly the cover, so the transport underneath lines up
     /// with its edges.
     private static let coverSize: CGFloat = 56
+    /// Focusing a side column shrinks the player too, not just the other side
+    /// column. Width alone wasn't enough: the centre flexes, so the clipboard
+    /// did get its room, but the player kept every pixel of its visual weight
+    /// and still read as the thing you were meant to be looking at.
+    private static let minimisedCoverSize: CGFloat = 30
+    /// Matches the columns' own reveal, so the one growing and the ones
+    /// shrinking move as a single exchange rather than overlapping animations.
+    private static let reveal = Animation.spring(response: 0.34, dampingFraction: 0.84)
+
+    /// Anything is focused, so the player is not.
+    private var isPlayerMinimised: Bool { focus != nil }
+
+    private var coverSize: CGFloat {
+        isPlayerMinimised ? Self.minimisedCoverSize : Self.coverSize
+    }
+
+    /// Exit and entry arrive in either order as the pointer crosses from one
+    /// column to the next, so an exit only clears focus if it still belongs to
+    /// the column reporting it. Without the guard, leaving the clipboard would
+    /// undo having just entered the shelf and both would snap back to rest.
+    private func setFocus(_ column: Column, _ hovering: Bool) {
+        withAnimation(Self.reveal) {
+            if hovering { focus = column }
+            else if focus == column { focus = nil }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -584,12 +639,27 @@ struct PeekCard: View {
                 }
                 agentColumn
                 Spacer(minLength: 0)
-                ShelfView(store: shelf) { targeted in
-                    // A drag session suppresses hover events, so without this the
-                    // peek would close the moment the pointer left the notch —
-                    // taking the drop target with it.
-                    coordinator.peekHoverChanged(targeted)
-                }
+                ClipboardView(
+                    store: clipboard,
+                    isFocused: focus == .clipboard,
+                    isMinimised: focus == .shelf,
+                    onHoverChange: { setFocus(.clipboard, $0) }
+                )
+                ShelfView(
+                    store: shelf,
+                    isFocused: focus == .shelf,
+                    isMinimised: focus == .clipboard,
+                    onHoverChange: { setFocus(.shelf, $0) },
+                    onDragTargeting: { targeted in
+                        // A drag session suppresses hover events, so without this
+                        // the peek would close the moment the pointer left the
+                        // notch — taking the drop target with it.
+                        coordinator.peekHoverChanged(targeted)
+                        // And the same suppression means the shelf would never be
+                        // told it has focus, so a drag claims it outright.
+                        if targeted { setFocus(.shelf, true) }
+                    }
+                )
             }
             connectors
         }
@@ -623,10 +693,18 @@ struct PeekCard: View {
         if let track = media.nowPlaying {
             VStack(spacing: 8) {
                 cover
-                transport(track)
+                // The transport goes rather than shrinking. Three hit targets at
+                // 30pt wide would be too small to aim at, and a control you can
+                // see but can't reliably hit is worse than one that stepped
+                // aside — it comes straight back when you leave the clipboard.
+                if !isPlayerMinimised {
+                    transport(track)
+                }
             }
-            .frame(width: Self.coverSize)
+            .frame(width: coverSize)
+            .opacity(isPlayerMinimised ? 0.5 : 1)
             .transition(.scale(scale: 0.9).combined(with: .opacity))
+            .animation(Self.reveal, value: isPlayerMinimised)
         }
     }
 
@@ -646,13 +724,14 @@ struct PeekCard: View {
                     .foregroundStyle(.white.opacity(0.25))
             }
         }
-        .frame(width: Self.coverSize, height: Self.coverSize)
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .frame(width: coverSize, height: coverSize)
+        .clipShape(RoundedRectangle(cornerRadius: isPlayerMinimised ? 6 : 9, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: isPlayerMinimised ? 6 : 9, style: .continuous)
                 .strokeBorder(.white.opacity(0.1), lineWidth: 0.5)
         )
         .animation(.easeOut(duration: 0.22), value: media.artwork != nil)
+        .animation(Self.reveal, value: isPlayerMinimised)
     }
 
     private func transport(_ track: MediaController.NowPlaying) -> some View {
@@ -665,6 +744,7 @@ struct PeekCard: View {
             transportButton("forward.fill", label: "Next track") { media.next() }
         }
         .frame(width: Self.coverSize)
+        .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .top)))
     }
 
     private func transportButton(
@@ -698,30 +778,40 @@ struct PeekCard: View {
     private var trackDetails: some View {
         if let track = media.nowPlaying {
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    if let logo = track.source.logoAsset {
-                        BrandMark(logo, size: 11)
-                    } else {
-                        Image(systemName: "music.note")
+                // Source, elapsed time, artist and the progress bar are all
+                // glanceable detail — exactly what you are *not* glancing at
+                // while reading clipboard rows. The title stays so the column
+                // still says which track it is.
+                if !isPlayerMinimised {
+                    HStack(spacing: 5) {
+                        if let logo = track.source.logoAsset {
+                            BrandMark(logo, size: 11)
+                        } else {
+                            Image(systemName: "music.note")
+                        }
+                        Text(track.source.displayName)
+                        Spacer(minLength: 4)
+                        Text(Self.timeLabel(track)).monospacedDigit()
                     }
-                    Text(track.source.displayName)
-                    Spacer(minLength: 4)
-                    Text(Self.timeLabel(track)).monospacedDigit()
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.35))
                 }
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.35))
 
                 Text(track.title)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .lineLimit(1)
-                Text(track.artist)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.5))
+                    .font(isPlayerMinimised ? .caption.weight(.medium) : .callout.weight(.medium))
+                    .foregroundStyle(.white.opacity(isPlayerMinimised ? 0.5 : 0.9))
                     .lineLimit(1)
 
-                progressBar(track).padding(.top, 4)
+                if !isPlayerMinimised {
+                    Text(track.artist)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(1)
+
+                    progressBar(track).padding(.top, 4)
+                }
             }
+            .animation(Self.reveal, value: isPlayerMinimised)
         } else if media.isPermissionDenied {
             hint("Allow notch-911 in System Settings → Privacy & Security → Automation to show what's playing.")
         } else if media.needsBrowserJavaScript {

@@ -32,6 +32,8 @@ struct StatusView: View {
             card {
                 stopRow
                 Divider().padding(.leading, 14)
+                clipboardRow
+                Divider().padding(.leading, 14)
                 youTubeMusicRow
             }
 
@@ -168,6 +170,16 @@ struct StatusView: View {
             isOn: $model.surfaceStop,
             title: "Surface Stop events",
             detail: "Ask \"anything else?\" at the end of every turn. Off by default — it fires a lot."
+        )
+    }
+
+    private var clipboardRow: some View {
+        toggleRow(
+            isOn: $model.clipboardHistory,
+            title: "Clipboard history in the notch",
+            detail: "Keeps the last \(ClipboardStore.maxItems) things you copied, in memory only — never written "
+                + "to disk. Entries apps mark as concealed, such as passwords, are skipped. "
+                + "Turning this off clears what's held."
         )
     }
 
