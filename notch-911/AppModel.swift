@@ -70,12 +70,27 @@ final class AppModel {
         }
     }
 
+    /// On by default — a clipboard history that has to be switched on is one
+    /// that's always off when you finally need the thing you overwrote. It stays
+    /// in memory, skips pasteboard entries marked concealed, and clears itself
+    /// when turned off.
+    var clipboardHistory: Bool {
+        didSet {
+            UserDefaults.standard.set(clipboardHistory, forKey: Self.clipboardHistoryKey)
+            clipboard.setCapturing(clipboardHistory)
+            append(clipboardHistory ? "clipboard history on" : "clipboard history off — cleared")
+        }
+    }
+
+    @ObservationIgnored static let clipboardHistoryKey = "notchd.clipboardHistory"
+
     /// Codex isn't installed everywhere; don't offer to wire up something absent.
     let isCodexInstalled = CodexSettings.isCodexInstalled()
 
     @ObservationIgnored let coordinator = PromptCoordinator()
     @ObservationIgnored let media = MediaMonitor()
     @ObservationIgnored let shelf = ShelfStore()
+    @ObservationIgnored let clipboard: ClipboardStore
 
     @ObservationIgnored private var server: HookServer?
     @ObservationIgnored private var panelController: NotchPanelController?
@@ -110,6 +125,11 @@ final class AppModel {
     private init() {
         surfaceStop = UserDefaults.standard.bool(forKey: "notchd.surfaceStop")
         youTubeMusic = UserDefaults.standard.bool(forKey: MediaController.youTubeMusicDefaultsKey)
+        // `bool(forKey:)` reads a missing key as false, which is the wrong
+        // default here — an absent key means "never set", not "switched off".
+        let capturing = UserDefaults.standard.object(forKey: Self.clipboardHistoryKey) as? Bool ?? true
+        clipboardHistory = capturing
+        clipboard = ClipboardStore(isCapturing: capturing)
     }
 
     var port: UInt16? {
@@ -134,7 +154,12 @@ final class AppModel {
                 + (NotchGeometry.hasNotch ? "notched" : "pill fallback")
             )
         }
-        panelController = NotchPanelController(coordinator: coordinator, media: media, shelf: shelf)
+        panelController = NotchPanelController(
+            coordinator: coordinator,
+            media: media,
+            shelf: shelf,
+            clipboard: clipboard
+        )
         // Visibility is no longer just "is there a prompt": the collapsed mini
         // player has to keep the panel on screen whenever music is playing.
         coordinator.onVisibilityChange = { [weak self] _ in
@@ -154,6 +179,7 @@ final class AppModel {
             self?.refreshPanelVisibility()
         }
         media.start()
+        clipboard.start()
         startCodexQuestionWatcher()
 
         let server = HookServer(token: token) { [weak self] request in
@@ -181,6 +207,7 @@ final class AppModel {
     }
 
     func shutDown() {
+        clipboard.stop()
         codexQuestionTask?.cancel()
         codexQuestionTask = nil
         for task in codexSubmissionTimeouts.values { task.cancel() }

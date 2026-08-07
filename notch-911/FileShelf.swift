@@ -187,12 +187,18 @@ import SwiftUI
 /// backgrounds, per the brief.
 struct ShelfView: View {
     let store: ShelfStore
+    /// The pointer is in this column. Owned by the peek rather than here, so
+    /// that focusing one column can shrink the others out of its way.
+    var isFocused = false
+    /// The pointer is in a *different* column: collapse to the fan and give the
+    /// width back.
+    var isMinimised = false
+    var onHoverChange: (Bool) -> Void = { _ in }
     /// Drop targeting, reported up so the peek stays open mid-drag. Hover events
     /// stop firing once a drag session starts, so the container's own `onHover`
     /// can't see the pointer arrive.
     var onDragTargeting: (Bool) -> Void = { _ in }
 
-    @State private var isOpen = false
     @State private var isTargeted = false
     @State private var hovered: UUID?
 
@@ -200,10 +206,19 @@ struct ShelfView: View {
     private static let gap: CGFloat = 8
     /// Three columns exactly, so the column never reflows as files come and go.
     static let width: CGFloat = tile * 3 + gap * 2
+    /// Minimised it only ever shows the fan, which is one tile plus the two
+    /// 11pt offsets behind it.
+    private static let minimisedWidth: CGFloat = tile + 22
 
     private static let reveal = Animation.spring(response: 0.34, dampingFraction: 0.84)
 
-    private var showsGrid: Bool { (isOpen || isTargeted) && !store.items.isEmpty }
+    /// A drag beats the focus rules: the grid has to open to be a drop target
+    /// even if the pointer technically counts as being somewhere else.
+    private var showsGrid: Bool { (isFocused || isTargeted) && !store.items.isEmpty }
+
+    private var width: CGFloat {
+        isMinimised && !isTargeted ? Self.minimisedWidth : Self.width
+    }
 
     /// Rows of three. Built eagerly on purpose — see `grid`.
     private var rows: [[ShelfItem]] {
@@ -226,14 +241,13 @@ struct ShelfView: View {
                     .transition(.scale(scale: 0.94, anchor: .top).combined(with: .opacity))
             }
         }
-        .frame(width: Self.width, alignment: .leading)
+        .frame(width: width, alignment: .leading)
+        .opacity(isMinimised && !isTargeted ? 0.5 : 1)
         .animation(Self.reveal, value: store.items.count)
+        .animation(Self.reveal, value: isFocused)
+        .animation(Self.reveal, value: isMinimised)
         .contentShape(Rectangle())
-        // Driven explicitly rather than by `.animation(value:)` so opening and
-        // closing share one transaction and stay symmetric.
-        .onHover { hovering in
-            withAnimation(Self.reveal) { isOpen = hovering }
-        }
+        .onHover(perform: onHoverChange)
         .dropDestination(for: URL.self) { urls, _ in
             store.accept(urls)
         } isTargeted: { targeted in
