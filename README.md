@@ -25,8 +25,8 @@ macOS 14+ &nbsp;·&nbsp; Swift 6 &nbsp;·&nbsp; SwiftUI + AppKit
 Claude Code and Codex both stop and wait for you — for permission, for a choice,
 for a plan-mode answer. notch-911 puts those prompts in the notch, so you answer
 them without leaving the window you were already in. While nothing is asking,
-the same surface shows what's playing and holds a shelf of files you're moving
-between apps.
+the same surface shows what's playing, keeps the last fifteen things you copied,
+and holds a shelf of files you're moving between apps.
 
 <div align="center">
   <img src="docs/images/hero-macbook.png" width="760" alt="notch-911 running on a MacBook Pro: a prompt hanging from the notch with the status window behind it">
@@ -96,6 +96,14 @@ macOS keeps exactly one thing on the clipboard. Copy a second thing and the
 first is gone. The notch holds the last **15**, newest first — hover to open the
 list, and each row has a copy icon that puts that entry back on the pasteboard,
 ready to paste.
+
+<div align="center">
+  <img src="docs/images/notch-clipboard.png" width="700" alt="The expanded notch with the clipboard column focused: five entries listed newest first, each with a copy icon, and a hovered row showing its forget button">
+  <br>
+  <sub>The clipboard holding five of fifteen. Focusing it stood the other
+  columns down — the shelf to its well, the player to a small cover and the
+  track title alone.</sub>
+</div>
 
 History is kept **in memory only and never written to disk**. Password managers,
 2FA codes and API tokens all pass through the clipboard, and a file quietly
