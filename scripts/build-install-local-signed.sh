@@ -99,6 +99,19 @@ if ! /usr/bin/codesign --verify --deep --strict --verbose=2 "${installed_app}"; 
     exit 1
 fi
 
+# Backups only need to be restorable, not launchable. A bootable .app left
+# here can be reopened by Launch Services — login-time window restoration, a
+# stray double-click, Spotlight — and then two copies fight over the notch
+# (the app's single-instance guard now catches that, but a backup shouldn't
+# be inviting it). Once the new install has verified, flatten every backup
+# into a zip; this also sweeps launchable backups left by earlier runs. The
+# error paths above keep their .app form on purpose — they restore by `mv`.
+for app in "${backup_directory}"/*.app(N); do
+    if /usr/bin/ditto -c -k --keepParent "${app}" "${app%.app}.zip"; then
+        /bin/rm -rf "${app}"
+    fi
+done
+
 if [[ "${reset_accessibility}" == true ]]; then
     /usr/bin/tccutil reset Accessibility "${bundle_identifier}"
     print "Reset only ${bundle_identifier}'s stale Accessibility record."
