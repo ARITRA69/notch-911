@@ -372,6 +372,16 @@ final class ClipboardStore {
     private(set) var items: [ClipItem] = []
     private(set) var thumbnails: [UUID: NSImage] = [:]
     private(set) var sourceIcons: [String: NSImage] = [:]
+
+    // Everything a row needs to draw itself, computed once per item instead of
+    // once per render. A row's body runs on every hover, and these are all
+    // things that must never be on that path: `icon(forFile:)` is a Launch
+    // Services round trip, `fileExists` is a disk stat, and `preview` walks and
+    // rewrites the string. Thirty rows re-rendering per pointer move made the
+    // list visibly stick.
+    private(set) var fileIcons: [UUID: NSImage] = [:]
+    private(set) var previews: [UUID: String] = [:]
+    private(set) var staleIDs: Set<UUID> = []
     private(set) var isCapturing = false
     /// Set briefly after a write-back so the row can acknowledge the click.
     private(set) var justCopied: UUID?
@@ -659,8 +669,10 @@ final class ClipboardStore {
 
         items.insert(item, at: 0)
         evict()
+        index(item)
         loadThumbnail(for: item)
         loadSourceIcon(for: item)
+        refreshFileStates()
         scheduleSave()
     }
 
@@ -693,11 +705,17 @@ final class ClipboardStore {
         for item in items { forget(item) }
         items.removeAll()
         thumbnails.removeAll()
+        fileIcons.removeAll()
+        previews.removeAll()
+        staleIDs.removeAll()
         flush()
     }
 
     private func forget(_ item: ClipItem) {
         thumbnails[item.id] = nil
+        fileIcons[item.id] = nil
+        previews[item.id] = nil
+        staleIDs.remove(item.id)
         discardBlobs(of: item)
     }
 
@@ -800,6 +818,52 @@ final class ClipboardStore {
     func sourceIcon(for item: ClipItem) -> NSImage? {
         guard let bundleID = item.source?.bundleID else { return nil }
         return sourceIcons[bundleID]
+    }
+
+    /// The cached row previews. All three of these are dictionary lookups on
+    /// purpose — see `previews` for why nothing here may touch disk.
+    func preview(for item: ClipItem) -> String {
+        previews[item.id] ?? Self.preview(for: item)
+    }
+
+    /// Image thumbnail for image clips, Finder icon for file clips, nil for text.
+    func rowImage(for item: ClipItem) -> NSImage? {
+        thumbnails[item.id] ?? fileIcons[item.id]
+    }
+
+    func isStale(_ item: ClipItem) -> Bool { staleIDs.contains(item.id) }
+
+    /// Fills the per-item caches. Called when an item arrives and on restore,
+    /// never from a view body.
+    private func index(_ item: ClipItem) {
+        previews[item.id] = Self.preview(for: item)
+        if item.kind == .files, let url = item.urls.first {
+            fileIcons[item.id] = NSWorkspace.shared.icon(forFile: url.path)
+        }
+    }
+
+    /// Re-checks which file clips have gone missing. Cheap enough to run
+    /// whenever a clipboard surface opens, and deliberately *not* per render:
+    /// staleness is disk state, so it costs a stat() per path.
+    func refreshFileStates() {
+        let probe = items.filter { $0.kind == .files }.map { ($0.id, $0.urls) }
+        guard !probe.isEmpty else {
+            if !staleIDs.isEmpty { staleIDs = [] }
+            return
+        }
+        Task { [weak self] in
+            let stale = await Task.detached(priority: .utility) {
+                Set(
+                    probe
+                        .filter { _, urls in
+                            urls.contains { !FileManager.default.fileExists(atPath: $0.path) }
+                        }
+                        .map(\.0)
+                )
+            }.value
+            guard let self, stale != staleIDs else { return }
+            staleIDs = stale
+        }
     }
 
     /// The first line, trimmed, for the row. Files show names; images show a
@@ -932,9 +996,11 @@ final class ClipboardStore {
         items = Array(manifest.items.filter(hasIntactPayload).prefix(Self.maxItems))
         sweepOrphanBlobs()
         for item in items {
+            index(item)
             loadThumbnail(for: item)
             loadSourceIcon(for: item)
         }
+        refreshFileStates()
     }
 
     private func hasIntactPayload(_ item: ClipItem) -> Bool {

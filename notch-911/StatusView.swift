@@ -330,6 +330,7 @@ struct StatusView: View {
                 }
             }
         }
+        .onAppear { model.clipboard.refreshFileStates() }
     }
 
     private var emptyClipboard: some View {
@@ -350,7 +351,7 @@ struct StatusView: View {
     }
 
     private func clipRow(_ item: ClipItem) -> some View {
-        let isStale = ClipboardStore.isStale(item)
+        let isStale = model.clipboard.isStale(item)
         return HStack(spacing: 12) {
             clipThumbnail(item)
                 .frame(width: 32, height: 32)
@@ -358,7 +359,7 @@ struct StatusView: View {
                 .opacity(isStale ? 0.4 : 1)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(ClipboardStore.preview(for: item))
+                Text(model.clipboard.preview(for: item))
                     .font(.callout)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -401,7 +402,7 @@ struct StatusView: View {
 
     private func clipCaption(_ item: ClipItem) -> String {
         var parts: [String] = []
-        parts.append(ClipboardStore.isStale(item) ? "File missing" : item.kind.label)
+        parts.append(model.clipboard.isStale(item) ? "File missing" : item.kind.label)
         if let name = item.source?.name { parts.append(name) }
         parts.append(Self.clock.string(from: item.lastCopiedAt))
         if item.copyCount > 1 { parts.append("copied \(item.copyCount)×") }
@@ -410,11 +411,10 @@ struct StatusView: View {
 
     @ViewBuilder
     private func clipThumbnail(_ item: ClipItem) -> some View {
-        if let image = model.clipboard.thumbnails[item.id] {
-            Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
-        } else if item.kind == .files, let url = item.urls.first {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-                .resizable().aspectRatio(contentMode: .fit)
+        if let image = model.clipboard.rowImage(for: item) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: item.kind == .files ? .fit : .fill)
         } else {
             ZStack {
                 Rectangle().fill(.background.secondary)

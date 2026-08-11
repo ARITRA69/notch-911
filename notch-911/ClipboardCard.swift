@@ -15,6 +15,63 @@
 import AppKit
 import SwiftUI
 
+/// Reports the pointer's position over a view, in top-left coordinates, or nil
+/// when it leaves.
+///
+/// This exists because SwiftUI's own hover modifiers stop delivering inside the
+/// clipboard list — see the call site. Tracking areas are region-based rather
+/// than hit-test based, so this keeps working with the rows drawn on top of it.
+///
+/// `hitTest` returns nil on purpose: the view sits in an `.overlay`, above the
+/// rows, so that it is unambiguously in the tracking path — but it must stay
+/// invisible to clicks, or it would swallow every press meant for a row.
+private struct PointerTracker: NSViewRepresentable {
+    var onMove: (CGPoint?) -> Void
+
+    func makeNSView(context: Context) -> TrackingView {
+        let view = TrackingView()
+        view.onMove = onMove
+        return view
+    }
+
+    func updateNSView(_ view: TrackingView, context: Context) {
+        view.onMove = onMove
+    }
+
+    final class TrackingView: NSView {
+        var onMove: ((CGPoint?) -> Void)?
+        private var tracking: NSTrackingArea?
+
+        /// Matches SwiftUI's top-left origin, so the caller's row arithmetic
+        /// doesn't have to flip anything.
+        override var isFlipped: Bool { true }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let tracking { removeTrackingArea(tracking) }
+            // `.inVisibleRect` keeps the area in step with scrolling and resize
+            // on its own, so this only ever runs on real geometry changes.
+            let area = NSTrackingArea(
+                rect: .zero,
+                options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: self
+            )
+            addTrackingArea(area)
+            tracking = area
+        }
+
+        override func mouseEntered(with event: NSEvent) { report(event) }
+        override func mouseMoved(with event: NSEvent) { report(event) }
+        override func mouseExited(with event: NSEvent) { onMove?(nil) }
+
+        private func report(_ event: NSEvent) {
+            onMove?(convert(event.locationInWindow, from: nil))
+        }
+    }
+}
+
 struct ClipboardCard: View {
     let store: ClipboardStore
     let coordinator: PromptCoordinator
@@ -70,7 +127,12 @@ struct ClipboardCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(shortcuts)
-        .onAppear { selection = store.items.first?.id }
+        .onAppear {
+            selection = store.items.first?.id
+            // Once per opening, off the main actor — a file clip can go stale
+            // between openings, but checking that per render costs a stat().
+            store.refreshFileStates()
+        }
     }
 
     // MARK: Heading and footer
@@ -152,12 +214,49 @@ struct ClipboardCard: View {
             }
         }
         .animation(Self.reveal, value: store.items.count)
+        // One tracking area for the whole column, and ours rather than SwiftUI's.
+        //
+        // Neither SwiftUI hover modifier survives this list. Per-row `.onHover`
+        // dies the moment a row rebuilds to show its ✕ — AppKit never delivers
+        // another enter/exit for that row, so the highlight sticks to whichever
+        // row you touched first. `.onContinuousHover` on the column fares no
+        // better: it reports two or three moves and then sends `.ended` while
+        // the pointer is still well inside, and never resumes. That was measured
+        // with the handler mutating no state at all, so it isn't re-render
+        // churn — it's the tracking area underneath, which SwiftUI gives us no
+        // way to reach.
+        //
+        // `PointerTracker` owns an `NSTrackingArea` directly and keeps
+        // reporting. Rows are a uniform height, so the row under the pointer is
+        // arithmetic — the third thing uniform rows buy, after unstuttering
+        // arrow-key scrolling and an exact `scrollHeight`. The gap above each
+        // row counts as part of it, so crossing a boundary can't flicker
+        // through "nothing hovered".
+        .overlay(
+            PointerTracker { point in
+                guard let point else {
+                    hovered = nil
+                    return
+                }
+                let index = Int(point.y / (Self.row + Self.gap))
+                guard store.items.indices.contains(index) else {
+                    hovered = nil
+                    return
+                }
+                let id = store.items[index].id
+                guard hovered != id else { return }
+                hovered = id
+                selection = id
+            }
+        )
     }
 
     private func row(_ item: ClipItem) -> some View {
         let isSelected = selection == item.id
         let isHovered = hovered == item.id
-        let isStale = ClipboardStore.isStale(item)
+        let isStale = store.isStale(item)
+        let isJustCopied = store.justCopied == item.id
+        let preview = store.preview(for: item)
 
         return Button { activate(item) } label: {
             HStack(spacing: 10) {
@@ -166,7 +265,7 @@ struct ClipboardCard: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .opacity(isStale ? 0.4 : 1)
 
-                Text(ClipboardStore.preview(for: item))
+                Text(preview)
                     .font(.callout)
                     .foregroundStyle(.white.opacity(isStale ? 0.4 : (isSelected ? 0.95 : 0.8)))
                     .lineLimit(2)
@@ -180,7 +279,7 @@ struct ClipboardCard: View {
                 // preview: stacked, it would cost the text its second line and
                 // push every row past 44.
                 HStack(spacing: 5) {
-                    if store.justCopied == item.id {
+                    if isJustCopied {
                         Text("Copied")
                             .transition(.opacity)
                     } else {
@@ -197,7 +296,7 @@ struct ClipboardCard: View {
 
                 // Space reserved for the delete button, which lives *outside*
                 // this label — see the overlay below.
-                Color.clear.frame(width: 14)
+                Color.clear.frame(width: 18)
             }
             .padding(.horizontal, 9)
             .frame(height: Self.row)
@@ -219,41 +318,45 @@ struct ClipboardCard: View {
                     withAnimation(Self.reveal) { store.remove(item) }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.caption2)
+                        .font(.body)
                         .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, .black.opacity(0.75))
+                        .foregroundStyle(.white.opacity(0.85), .white.opacity(0.18))
+                        // A larger transparent hit area than the glyph, so the
+                        // target isn't a 13pt circle at the edge of the panel.
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.trailing, 9)
+                .padding(.trailing, 4)
                 .transition(.scale.combined(with: .opacity))
                 .accessibilityLabel("Remove this clipping")
             }
         }
-        .onHover { inside in
-            if inside {
-                hovered = item.id
-                selection = item.id
-            } else if hovered == item.id {
-                hovered = nil
-            }
-        }
-        .animation(.easeOut(duration: 0.14), value: hovered)
-        .animation(.easeOut(duration: 0.14), value: selection)
-        .animation(.easeOut(duration: 0.14), value: store.justCopied)
-        .help(ClipboardStore.preview(for: item))
-        .accessibilityLabel("\(item.kind.label): \(ClipboardStore.preview(for: item))")
+        // No `.onHover` here — see `list`, which tracks the pointer for the
+        // whole column.
+        // Keyed on this row's own booleans, not on the card-level `hovered` /
+        // `selection`. Keyed on those, moving the pointer one row re-ran the
+        // animation on all thirty rows at once — two full list-wide animation
+        // passes per crossing, which is what made the highlight feel like it
+        // was dragging itself along behind the cursor.
+        .animation(.easeOut(duration: 0.14), value: isHovered)
+        .animation(.easeOut(duration: 0.14), value: isSelected)
+        .animation(.easeOut(duration: 0.14), value: isJustCopied)
+        // No `.help()`. Its tooltip gets stranded over the list — the pointer is
+        // tracked by an overlay that reports nil from `hitTest`, so AppKit's
+        // tooltip machinery never learns the pointer moved on, and a stale
+        // filename hangs over the rows. The two-line preview is the tooltip.
+        .accessibilityLabel("\(item.kind.label): \(preview)")
     }
 
     @ViewBuilder
     private func thumbnail(_ item: ClipItem) -> some View {
-        if let image = store.thumbnails[item.id] {
+        // Cached by the store. Resolving a Finder icon here would put a Launch
+        // Services call on every hover.
+        if let image = store.rowImage(for: item) {
             Image(nsImage: image)
                 .resizable()
-                .aspectRatio(contentMode: .fill)
-        } else if item.kind == .files, let url = item.urls.first {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-                .resizable()
-                .aspectRatio(contentMode: .fit)
+                .aspectRatio(contentMode: item.kind == .files ? .fit : .fill)
         } else {
             ZStack {
                 Color.white.opacity(0.06)
