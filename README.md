@@ -34,6 +34,37 @@ between apps, and keeps the last 30 things you copied.
 
 ---
 
+## Install
+
+[**Download the latest DMG**](https://github.com/ARITRA69/notch-911/releases/latest)
+from Releases, open it, and drag **notch-911** into **Applications**.
+
+Two things to know, both consequences of this app being unsigned and
+un-notarized — there is no paid Apple Developer account behind it:
+
+**macOS will refuse to open it at first.** Gatekeeper only trusts apps
+notarized by Apple, so the first launch is blocked with a claim that the app
+"is damaged" or "can't be checked for malicious software". It isn't damaged —
+it just carries the quarantine flag every downloaded file gets. Remove the
+flag once and the app opens normally from then on:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/notch-911.app
+```
+
+**Accessibility needs re-granting after each update.** macOS ties the
+Accessibility permission (used for Direct Codex answers) to the app's code
+signature, and an unsigned app has no stable identity across versions, so the
+grant silently stops working after an update. Fix: in **System Settings →
+Privacy & Security → Accessibility**, remove notch-911 with the **−** button,
+then add it back with **+**.
+
+The app checks GitHub for a newer release once a day and, when one exists,
+shows **Update Available** in the notch-911 application menu — it only opens
+the release page in your browser, nothing downloads itself.
+
+---
+
 ## What it does
 
 ### Agent prompts, in the notch
@@ -313,8 +344,9 @@ notch-911/
   CodexPlanQuestionWatcher.swift   Rollout-log watcher
   CodexAccessibilityBridge.swift   Accessibility submission
   CodeSignatureInspector.swift     Signing diagnostics
+  UpdateChecker.swift              Daily GitHub Releases check + menu item
 notch-911Tests/                    Five suites
-scripts/                           Signing identity, installer, icon generator
+scripts/                           Signing identity, installer, release DMG, icon generator
 docs/images/                       README assets
 ```
 

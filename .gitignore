@@ -10,6 +10,7 @@ Icon?
 # Xcode — build products
 build/
 DerivedData/
+dist/
 *.moved-aside
 *.hmap
 *.ipa

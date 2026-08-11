@@ -21,6 +21,7 @@ struct notch_911App: App {
         // what left the event log clipped with no way to reach it. `.contentMinSize`
         // keeps the view's minimum as the floor and lets the window grow.
         .windowResizability(.contentMinSize)
+        .commands { UpdateCommands() }
     }
 }
 
@@ -34,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               ProcessInfo.processInfo.environment["XCTestSessionIdentifier"] == nil
         else { return }
         AppModel.shared.start()
+        UpdateChecker.shared.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
