@@ -25,8 +25,8 @@ macOS 14+ &nbsp;·&nbsp; Swift 6 &nbsp;·&nbsp; SwiftUI + AppKit &nbsp;·&nbsp; 
 Claude Code and Codex both stop and wait for you — for permission, for a choice,
 for a plan-mode answer. notch-911 puts those prompts in the notch, so you answer
 them without leaving the window you were already in. While nothing is asking,
-the same surface shows what's playing and holds a shelf of files you're moving
-between apps.
+the same surface shows what's playing, holds a shelf of files you're moving
+between apps, and keeps the last 30 things you copied.
 
 <div align="center">
   <img src="docs/images/hero-macbook.png" width="760" alt="notch-911 running on a MacBook Pro: a prompt hanging from the notch with the status window behind it">
@@ -108,15 +108,78 @@ immediately.
   both agents connected.</sub>
 </div>
 
+### Clipboard history
+
+macOS throws the clipboard away constantly and silently: copy something else and
+the last thing is gone. This keeps the last **30** things you copied — text,
+images, files — in the same surface, and puts any of them back on the pasteboard
+with a click.
+
+Press **⇧⌘V** from anywhere, or use the clipboard chip in the peek.
+
+<div align="center">
+  <img src="docs/images/notch-clipboard.png" width="680" alt="The clipboard surface hanging from the notch: nine clippings listed newest first, each with a thumbnail, a preview and its kind">
+  <br>
+  <sub>Newest first. Files carry their real icon, images their thumbnail, text
+  the first line — and the row you're on is the one <code>↵</code> copies.</sub>
+</div>
+
+`↑`/`↓` move, `↵` copies and closes, `⌘1`–`⌘9` jump straight to the nine newest,
+`⌫` removes one, `⎋` closes. Clicking a row does the same as `↵`. Nothing is
+pasted for you — the clipboard is primed and your own ⌘V is the paste, which is
+why this needs no Accessibility permission.
+
+Copy anything while the notch is closed and it acknowledges with a checkmark in
+the right wing, opposite the mini player's disc, for about a second:
+
+<div align="center">
+  <img src="docs/images/notch-copied-badge.png" width="500" alt="The collapsed notch with the now-playing disc in the left wing and a checkmark in the right">
+</div>
+
+**Anything an app marks confidential is never captured.** Password managers stamp
+their writes with the [nspasteboard.org](http://nspasteboard.org) marker types,
+and those are checked against the pasteboard's *type list* before a single byte
+is read — a secret should never reach this app's heap, let alone its crash logs.
+
+Files are stored as **references**, unlike the shelf above, which copies. A shelf
+of references breaks because drags hand over temp files; a Finder ⌘C hands over a
+real path, and quietly duplicating a 4 GB video into Application Support on every
+copy would not be a favour. A clip whose file has since moved is shown dimmed and
+can't be put back on the pasteboard.
+
+History is capped at 30 items **and** 256 MB on disk, and survives relaunch —
+text inline in a JSON manifest, images and long text as blobs beside it, with
+blobs always written before the manifest that references them.
+
+The one cost worth knowing: `NSPasteboard` has no change notification of any
+kind, so this polls `changeCount` twice a second for the life of the app. That is
+one integer read per tick — the expensive path only runs when the count actually
+moves — but it does mean the app is no longer doing literally nothing when idle.
+
+> ⇧⌘V is *Paste and Match Style* in Chrome, Slack and Notes. A global hot key
+> preempts the front app, so registering it shadows that shortcut everywhere.
+> The binding is one constant in `AppModel.registerClipboardHotkey()` if you'd
+> rather have ⌥⌘V. Worth knowing too: when another app already owns a chord,
+> `RegisterEventHotKey` succeeds and then simply never fires, with no API to
+> detect it — so the status window reports whether it registered, and the peek
+> chip is always there as a way in that can't silently break.
+
 ---
 
 ## The status window
 
-Server state, which hooks are registered, and everything that has come through.
-Closing it doesn't quit the app — it stays running as a background listener.
+Server state, which hooks are registered, everything that has come through, and
+the clipboard. Closing it doesn't quit the app — it stays running as a background
+listener.
 
 <div align="center">
-  <img src="docs/images/status-window.png" width="560" alt="notch-911 status window showing hook server, Claude Code hook, Codex hook and Accessibility state">
+  <img src="docs/images/status-window.png" width="520" alt="The Status tab: hook server, Claude Code hook, Codex hook, Accessibility state, and the settings toggles">
+  &nbsp;&nbsp;
+  <img src="docs/images/status-clipboard.png" width="520" alt="The Clipboard tab: every stored clipping with its source, time, a Copy button and a remove button">
+  <br>
+  <sub><b>Status</b> — connectors and settings. <b>Clipboard</b> — everything
+  being held, with <b>Copy</b> and per-row remove. <b>Events</b> — the log.
+  Each pane scrolls on its own.</sub>
 </div>
 
 ---
@@ -202,6 +265,11 @@ signing identity, so ad-hoc rebuilds would silently drop the grant every time.
 | **Automation** (Apple Events) | Read and control Music.app / Spotify | First now-playing use |
 | **Automation** (browser) | Read YouTube Music via `navigator.mediaSession` | Off by default |
 
+Clipboard history needs **no permission at all**. That is why ⇧⌘V is a Carbon
+hot key rather than an `NSEvent` global monitor — the latter is gated on
+Accessibility, and asking to read every keystroke you type in order to open a
+list of clippings is not a reasonable trade.
+
 ---
 
 ## Verification
@@ -236,6 +304,9 @@ notch-911/
   StatusView.swift                 Status window
   MediaController.swift            Music / Spotify / YouTube Music
   FileShelf.swift                  Drag-in / drag-out shelf
+  ClipboardHistory.swift           Pasteboard capture, dedupe, persistence
+  ClipboardCard.swift              The clipboard surface
+  GlobalHotkey.swift               ⇧⌘V registration
   BrandMark.swift                  Service marks from the asset catalog
   ClaudeSettings.swift             ~/.claude/settings.json merge
   CodexSettings.swift              Codex shim registration

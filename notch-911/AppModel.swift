@@ -7,6 +7,7 @@
 //
 
 import AppKit
+import Carbon.HIToolbox
 import Foundation
 import Observation
 import os
@@ -70,12 +71,39 @@ final class AppModel {
         }
     }
 
+    /// Capture is on by default — a clipboard history you must switch on before
+    /// it records anything is empty exactly when you first go looking for it.
+    /// The switch exists so it can be turned *off*.
+    ///
+    /// This is the one setting that departs from the house posture of opt-in.
+    /// `surfaceStop` and `youTubeMusic` default off because they reach outward —
+    /// rewriting hook config, scripting every browser tab. Clipboard capture is
+    /// local, nothing leaves this Mac, and `ClipboardCapture.excludedTypes`
+    /// covers the genuinely sensitive case.
+    ///
+    /// Turning it off stops capture but keeps what's already there; silently
+    /// deleting history on a toggle is not a thing a toggle should do.
+    var clipboardCapture: Bool {
+        didSet {
+            UserDefaults.standard.set(clipboardCapture, forKey: ClipboardStore.captureDefaultsKey)
+            clipboard.setCapturing(clipboardCapture)
+            append(clipboardCapture ? "clipboard capture on" : "clipboard capture off")
+        }
+    }
+
     /// Codex isn't installed everywhere; don't offer to wire up something absent.
     let isCodexInstalled = CodexSettings.isCodexInstalled()
+
+    /// Whether ⇧⌘V registered. Not whether it *works* — a chord another app
+    /// already owns registers successfully and then never fires, with no API to
+    /// detect it — but a failed registration is worth surfacing.
+    private(set) var isClipboardHotkeyRegistered = false
 
     @ObservationIgnored let coordinator = PromptCoordinator()
     @ObservationIgnored let media = MediaMonitor()
     @ObservationIgnored let shelf = ShelfStore()
+    @ObservationIgnored let clipboard = ClipboardStore()
+    @ObservationIgnored private var clipboardHotkey: GlobalHotkey?
 
     @ObservationIgnored private var server: HookServer?
     @ObservationIgnored private var panelController: NotchPanelController?
@@ -108,8 +136,12 @@ final class AppModel {
     ]
 
     private init() {
+        // `UserDefaults.bool(forKey:)` answers false for an unset key, so a
+        // default of *on* has to be registered rather than assumed.
+        UserDefaults.standard.register(defaults: [ClipboardStore.captureDefaultsKey: true])
         surfaceStop = UserDefaults.standard.bool(forKey: "notchd.surfaceStop")
         youTubeMusic = UserDefaults.standard.bool(forKey: MediaController.youTubeMusicDefaultsKey)
+        clipboardCapture = UserDefaults.standard.bool(forKey: ClipboardStore.captureDefaultsKey)
     }
 
     var port: UInt16? {
@@ -134,7 +166,12 @@ final class AppModel {
                 + (NotchGeometry.hasNotch ? "notched" : "pill fallback")
             )
         }
-        panelController = NotchPanelController(coordinator: coordinator, media: media, shelf: shelf)
+        panelController = NotchPanelController(
+            coordinator: coordinator,
+            media: media,
+            shelf: shelf,
+            clipboard: clipboard
+        )
         // Visibility is no longer just "is there a prompt": the collapsed mini
         // player has to keep the panel on screen whenever music is playing.
         coordinator.onVisibilityChange = { [weak self] _ in
@@ -153,7 +190,14 @@ final class AppModel {
         media.onChange = { [weak self] in
             self?.refreshPanelVisibility()
         }
+        // Both edges of the capture flash: bring the panel on screen for the
+        // badge, and let it go again once the badge has left.
+        clipboard.onCapture = { [weak self] in
+            self?.refreshPanelVisibility()
+        }
         media.start()
+        clipboard.setCapturing(clipboardCapture)
+        registerClipboardHotkey()
         startCodexQuestionWatcher()
 
         let server = HookServer(token: token) { [weak self] request in
@@ -188,7 +232,33 @@ final class AppModel {
         for cancellation in codexSubmissionCancellations.values { cancellation.cancel() }
         codexSubmissionCancellations.removeAll()
         coordinator.releaseAll()
+        clipboardHotkey?.invalidate()
+        clipboardHotkey = nil
+        clipboard.flush()
         server?.stop()
+    }
+
+    /// Registered from `start()` and nowhere else, so it inherits the XCTest
+    /// guard in `AppDelegate` — a test run that grabbed a system-wide chord
+    /// would reach straight out of the test and into the developer's machine.
+    private func registerClipboardHotkey() {
+        // Carbon modifier masks, *not* `NSEvent.ModifierFlags` — different bit
+        // layouts, and mixing them registers a chord nobody can type.
+        clipboardHotkey = GlobalHotkey(
+            keyCode: UInt32(kVK_ANSI_V),
+            carbonModifiers: UInt32(cmdKey | shiftKey)
+        ) { [weak self] in
+            self?.coordinator.toggleClipboard()
+        }
+        isClipboardHotkeyRegistered = clipboardHotkey != nil
+        append(isClipboardHotkeyRegistered
+               ? "⇧⌘V registered for clipboard history"
+               : "⇧⌘V could not be registered — another app may already own it")
+    }
+
+    func clearClipboardHistory() {
+        clipboard.removeAll()
+        append("cleared clipboard history")
     }
 
     // MARK: Hook handling
@@ -398,11 +468,12 @@ final class AppModel {
         }
     }
 
-    /// The panel stays on screen for a prompt, for the peek, or for the
-    /// collapsed mini player — anything else orders it out.
+    /// The panel stays on screen for a prompt, for the peek, for the collapsed
+    /// mini player, or for the moment a copy is being acknowledged — anything
+    /// else orders it out.
     private func refreshPanelVisibility() {
         panelController?.setVisible(
-            coordinator.current != nil || coordinator.isPeeking || media.nowPlaying != nil
+            coordinator.isInteractive || media.nowPlaying != nil || clipboard.justCaptured
         )
     }
 

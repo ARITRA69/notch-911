@@ -17,7 +17,10 @@ struct notch_911App: App {
         Window("notch-911", id: "status") {
             StatusView(model: model)
         }
-        .windowResizability(.contentSize)
+        // `.contentSize` pinned the window to exactly the view's frame, which is
+        // what left the event log clipped with no way to reach it. `.contentMinSize`
+        // keeps the view's minimum as the floor and lets the window grow.
+        .windowResizability(.contentMinSize)
     }
 }
 
@@ -34,6 +37,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Same guard as launch, for the same reason plus one more: touching
+        // `AppModel.shared` here would *construct* it, and with it a
+        // `ClipboardStore` pointed at the real Application Support directory —
+        // which restores, sweeps orphan blobs and then writes the manifest back.
+        // A test run has no business rewriting the installed app's clipboard
+        // history on its way out.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
+              ProcessInfo.processInfo.environment["XCTestSessionIdentifier"] == nil
+        else { return }
         AppModel.shared.shutDown()
     }
 

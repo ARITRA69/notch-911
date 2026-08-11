@@ -10,6 +10,20 @@
 import Foundation
 import Observation
 
+/// What the notch is showing when no prompt is blocked. One slot rather than a
+/// Bool per surface: the peek and the clipboard are mutually exclusive by
+/// construction, and two Bools would spell four states — one of which is
+/// nonsense every guard in `evaluateHover` would then have to defend against.
+nonisolated enum IdleSurface: Sendable, Equatable {
+    /// Hover-dwell over the notch. Opens on its own, so it may never take the
+    /// keyboard.
+    case peek
+    /// Clipboard history. Only ever opened by an explicit act — ⇧⌘V or the chip
+    /// in the peek — which is what earns it the keyboard.
+    case clipboard
+    case none
+}
+
 nonisolated enum ExternalSubmissionState: Sendable, Equatable {
     case idle
     case requestingPermission
@@ -35,13 +49,24 @@ final class PromptCoordinator {
     private(set) var current: Prompt?
     /// How many more are stacked up behind it, for the "2 more" indicator.
     private(set) var waitingCount: Int = 0
-    /// Hover-peek: the idle surface, shown after a dwell over the notch.
-    private(set) var isPeeking = false {
-        didSet {
-            guard isPeeking != oldValue else { return }
-            onPeekChange?(isPeeking)
-        }
-    }
+    /// The idle surface currently on the notch. Mutated only through
+    /// `setIdleSurface` — the pointer latch and the visibility callback have to
+    /// move with it.
+    private(set) var idleSurface: IdleSurface = .none
+
+    /// Kept as a computed property so the hover-peek call sites read the way
+    /// they always did.
+    var isPeeking: Bool { idleSurface == .peek }
+
+    /// Anything that should stop the panel being click-through. The collapsed
+    /// mini player deliberately isn't one — it's decoration, and a 720×620
+    /// window that eats clicks for a 22pt disc is a bug.
+    var isInteractive: Bool { current != nil || idleSurface != .none }
+
+    /// Surfaces allowed to take the keyboard. A peek never may: it opens on
+    /// hover alone, and swallowing the next keystroke meant for the user's
+    /// editor is the one unforgivable thing a hover surface can do.
+    var wantsKeyboard: Bool { current != nil || idleSurface == .clipboard }
 
     /// Fires as the peek opens and closes, so pollers can run only while the
     /// surface is on screen.
@@ -234,7 +259,7 @@ final class PromptCoordinator {
     func resurface() {
         guard current == nil, !waiting.isEmpty else { return }
         dwell?.cancel()
-        isPeeking = false
+        setIdleSurface(.none)
         advance()
     }
 
@@ -243,10 +268,69 @@ final class PromptCoordinator {
     func resurface(_ prompt: Prompt) {
         guard current == nil, let index = waiting.firstIndex(where: { $0.id == prompt.id }) else { return }
         dwell?.cancel()
-        isPeeking = false
+        setIdleSurface(.none)
         let chosen = waiting.remove(at: index)
         waitingCount = waiting.count
         present(chosen)
+    }
+
+    // MARK: Idle surface
+
+    /// Every idle-surface change goes through here. Three things have to happen
+    /// together, and getting any one wrong is a ghost-peek bug:
+    ///
+    /// 1. `onPeekChange` fires only on transitions in and out of `.peek`. The
+    ///    media poller is its only listener, and the clipboard card shows no
+    ///    progress bar — speeding the poll up for it would spawn `osascript`
+    ///    once a second for nothing.
+    /// 2. `pointerOnPanel` is cleared whenever the peek isn't up. The flag only
+    ///    means anything while the peek owns the surface, and SwiftUI never
+    ///    delivers the matching `onHover(false)` once the panel is ordered out
+    ///    or the card is unmounted — so a stale `true` latches, and the next
+    ///    stray sensor event re-opens a peek from a pointer that left the screen
+    ///    minutes ago.
+    /// 3. `onVisibilityChange` fires on *every* change, not just visible↔hidden.
+    ///    `setVisible` is where `ignoresMouseEvents` and key status are decided,
+    ///    so a peek→clipboard swap that skipped it would leave the panel unable
+    ///    to take a keystroke. `refreshPanelVisibility` recomputes from scratch
+    ///    and ignores the Bool, so re-entering it is free.
+    private func setIdleSurface(_ surface: IdleSurface) {
+        let wasPeeking = idleSurface == .peek
+        idleSurface = surface
+        if surface != .peek {
+            pointerOnPanel = false
+            if wasPeeking { onPeekChange?(false) }
+        } else if !wasPeeking {
+            onPeekChange?(true)
+        }
+        onVisibilityChange?(current != nil || surface != .none)
+    }
+
+    /// ⇧⌘V, and the chip in the peek. Toggling closed rather than re-opening is
+    /// what makes the hotkey feel like a drawer instead of a command.
+    func toggleClipboard() {
+        // A blocked prompt outranks it (§4 — never two surfaces at once). It is
+        // also the one the user can't summon back with a keystroke.
+        guard current == nil else { return }
+        dwell?.cancel()
+        setIdleSurface(idleSurface == .clipboard ? .none : .clipboard)
+    }
+
+    /// From the peek chip, where "toggle" would be ambiguous.
+    func openClipboard() {
+        guard current == nil, idleSurface != .clipboard else { return }
+        dwell?.cancel()
+        setIdleSurface(.clipboard)
+    }
+
+    /// `esc`, a click outside, and copying an item.
+    func closeClipboard() {
+        guard idleSurface == .clipboard else { return }
+        dwell?.cancel()
+        // Collapses outright rather than falling back to the peek, even with the
+        // pointer still over the notch — the same reasoning as `advance()`:
+        // re-opening into a surface the user didn't ask for reads as a glitch.
+        setIdleSurface(.none)
     }
 
     // MARK: Hover peek
@@ -267,9 +351,10 @@ final class PromptCoordinator {
             return
         }
         dwell?.cancel()
-        guard current == nil, !isPeeking else { return }
-        isPeeking = true
-        onVisibilityChange?(true)
+        // A hotkey-opened clipboard outranks a drag: the user is holding a file,
+        // but they asked for the clipboard out loud.
+        guard current == nil, idleSurface == .none else { return }
+        setIdleSurface(.peek)
     }
 
     /// The pointer entered or left the expanded panel.
@@ -288,34 +373,37 @@ final class PromptCoordinator {
         let inside = pointerOnSensor || pointerOnPanel
 
         if inside {
-            // A real blocked prompt outranks the idle surface.
-            guard current == nil, !isPeeking else { return }
+            // A real blocked prompt outranks the idle surface, and so does a
+            // clipboard the user deliberately opened.
+            guard current == nil, idleSurface == .none else { return }
             // Short enough to feel immediate, long enough that crossing the
             // notch on the way somewhere else doesn't trigger it. The sensor is
             // only the notch itself, and nothing else lives there, so this can
             // be far tighter than a menu-bar hot corner would allow.
             dwell = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(Self.peekDelayMilliseconds))
-                guard !Task.isCancelled, let self, current == nil else { return }
-                isPeeking = true
-                onVisibilityChange?(true)
+                guard !Task.isCancelled, let self,
+                      current == nil, idleSurface == .none else { return }
+                setIdleSurface(.peek)
             }
         } else {
-            guard isPeeking else { return }
+            // Only the peek closes on pointer exit. The clipboard was opened by
+            // an explicit act and is dismissed by one — moving the mouse away to
+            // read something is not a decision to close it.
+            guard idleSurface == .peek else { return }
             dwell = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(Self.peekCloseGraceMilliseconds))
-                guard !Task.isCancelled, let self else { return }
-                isPeeking = false
-                onVisibilityChange?(current != nil)
+                guard !Task.isCancelled, let self, idleSurface == .peek else { return }
+                setIdleSurface(.none)
             }
         }
     }
 
-    func endPeek() {
+    /// Close whatever idle surface is up, whichever it is.
+    func closeIdleSurface() {
         dwell?.cancel()
-        guard isPeeking else { return }
-        isPeeking = false
-        onVisibilityChange?(current != nil)
+        guard idleSurface != .none else { return }
+        setIdleSurface(.none)
     }
 
     // MARK: Teardown
@@ -334,18 +422,17 @@ final class PromptCoordinator {
         waitingCount = 0
         current = nil
         dwell?.cancel()
-        isPeeking = false
-        onVisibilityChange?(false)
+        setIdleSurface(.none)
     }
 
     // MARK: Private
 
     private func present(_ prompt: Prompt) {
-        // A prompt always wins over the idle surface.
+        // A prompt always wins over the idle surface. `current` is assigned
+        // *before* the setter so the visibility callback sees the new prompt.
         dwell?.cancel()
-        isPeeking = false
         current = prompt
-        onVisibilityChange?(true)
+        setIdleSurface(.none)
     }
 
     private func advance() {
@@ -356,8 +443,7 @@ final class PromptCoordinator {
             // notch — re-opening into a peek the user didn't ask for reads as a
             // glitch rather than a feature. Another dwell brings it back.
             dwell?.cancel()
-            isPeeking = false
-            onVisibilityChange?(false)
+            setIdleSurface(.none)
         } else {
             let next = waiting.removeFirst()
             waitingCount = waiting.count

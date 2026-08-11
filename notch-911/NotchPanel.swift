@@ -17,7 +17,15 @@ import SwiftUI
 final class NotchPanel: NSPanel {
     /// Without this the panel can never take keyboard input. Combined with
     /// `.nonactivatingPanel` it takes keys *without* activating the app.
-    override var canBecomeKey: Bool { true }
+    ///
+    /// Flipped per surface by the controller rather than left permanently on.
+    /// `setVisible(false)` defers `orderOut` by 600ms so the collapse spring can
+    /// finish, and a panel that stays key for those 600ms eats whatever the user
+    /// types straight after their own `esc` — which, for a surface summoned by a
+    /// global hotkey, is exactly when they are mid-sentence. A keypress that
+    /// silently disappears is worse than one that beeps.
+    var acceptsKeyboard = false
+    override var canBecomeKey: Bool { acceptsKeyboard }
     override var canBecomeMain: Bool { false }
 }
 
@@ -86,18 +94,24 @@ enum NotchGeometry {
 }
 
 @MainActor
-final class NotchPanelController {
+final class NotchPanelController: NSObject {
 
     /// Fixed at the maximum expanded bounds. Sized for the tallest surface we
-    /// can present — a multi-field elicitation form — not the smallest.
-    private static let panelSize = CGSize(width: 720, height: 620)
+    /// can present — a multi-field elicitation form — not the smallest. Not
+    /// private: the shadow layer has to know the ceiling it draws into.
+    static let panelSize = CGSize(width: 720, height: 620)
 
     private let panel: NotchPanel
     private let sensor: HoverSensorPanel
     private let coordinator: PromptCoordinator
     private let media: MediaMonitor
 
-    init(coordinator: PromptCoordinator, media: MediaMonitor, shelf: ShelfStore) {
+    init(
+        coordinator: PromptCoordinator,
+        media: MediaMonitor,
+        shelf: ShelfStore,
+        clipboard: ClipboardStore
+    ) {
         self.coordinator = coordinator
         self.media = media
 
@@ -143,9 +157,19 @@ final class NotchPanelController {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
 
-        let hosting = NSHostingView(rootView: NotchPromptView(coordinator: coordinator, media: media, shelf: shelf))
+        let hosting = NSHostingView(
+            rootView: NotchPromptView(
+                coordinator: coordinator,
+                media: media,
+                shelf: shelf,
+                clipboard: clipboard
+            )
+        )
         hosting.frame = CGRect(origin: .zero, size: Self.panelSize)
         panel.contentView = hosting
+
+        super.init()
+        panel.delegate = self
 
         reposition()
         sensor.orderFrontRegardless()
@@ -160,6 +184,18 @@ final class NotchPanelController {
         // sensor with it, or the wings aren't hoverable.
         repositionSensor()
         guard visible else {
+            // The collapse runs for another 600ms but the keyboard has to go
+            // back *now*. `orderOut` is the only supported way to resign key, so
+            // do exactly that and immediately re-front: with `acceptsKeyboard`
+            // already false the panel returns purely as a display surface and
+            // the spring finishes on screen. Both calls land in the same runloop
+            // turn, so there is nothing to see.
+            let wasKey = panel.isKeyWindow
+            panel.acceptsKeyboard = false
+            if wasKey {
+                panel.orderOut(nil)
+                panel.orderFrontRegardless()
+            }
             // Ordering the window out immediately would kill the collapse
             // mid-flight. Let the spring finish shrinking the surface back into
             // the notch first, then remove the window.
@@ -176,12 +212,23 @@ final class NotchPanelController {
         // The panel now stays on screen for the collapsed mini player, so it has
         // to stop swallowing clicks across its whole 720×620 frame when there is
         // nothing interactive in it.
-        panel.ignoresMouseEvents = !(coordinator.current != nil || coordinator.isPeeking)
-        if coordinator.current != nil {
-            // Only a real prompt takes the keyboard. A peek that stole keys
-            // would swallow the next thing the user typed into their editor.
+        panel.ignoresMouseEvents = !coordinator.isInteractive
+        panel.acceptsKeyboard = coordinator.wantsKeyboard
+        if coordinator.wantsKeyboard {
+            // A prompt or the clipboard. Both are surfaces the user asked for
+            // and will type or arrow around in, so taking the keyboard is the
+            // contract. A peek still must not: it opens on hover alone, and
+            // swallowing the next thing the user typed into their editor is the
+            // one unforgivable thing a hover surface can do.
             panel.makeKeyAndOrderFront(nil)
         } else {
+            // `canBecomeKey` going false does *not* evict a window that is
+            // already key — only `orderOut` does. This branch is reachable while
+            // the panel stays on screen for the collapsed mini player, so
+            // closing the clipboard with music playing would otherwise leave the
+            // panel holding the keyboard indefinitely, swallowing every key the
+            // user pressed next — including the ⌘V they opened it to press.
+            if panel.isKeyWindow { panel.orderOut(nil) }
             panel.orderFrontRegardless()
         }
     }
@@ -203,6 +250,22 @@ final class NotchPanelController {
     private func repositionSensor() {
         if let sensorFrame = NotchGeometry.sensorFrame(forMiniPlayer: media.nowPlaying != nil) {
             sensor.setFrame(sensorFrame, display: false)
+        }
+    }
+}
+
+extension NotchPanelController: NSWindowDelegate {
+    /// The panel loses key when the user clicks into another app. For the
+    /// clipboard that means "never mind", the same as `esc` — a picker you
+    /// summoned and then ignored should not stay on screen.
+    ///
+    /// Strictly guarded on `.clipboard`: a prompt is a blocked session, and the
+    /// user going somewhere else to think about it is the most ordinary thing in
+    /// the world.
+    nonisolated func windowDidResignKey(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            guard coordinator.idleSurface == .clipboard else { return }
+            coordinator.closeClipboard()
         }
     }
 }
@@ -304,6 +367,7 @@ struct NotchPromptView: View {
     let coordinator: PromptCoordinator
     let media: MediaMonitor
     let shelf: ShelfStore
+    let clipboard: ClipboardStore
 
     /// What the surface is rendering. Held in view state rather than read
     /// straight from the coordinator so the content outlives the collapse:
@@ -311,6 +375,7 @@ struct NotchPromptView: View {
     /// it snap shut instead of shrinking back into the notch.
     @State private var shownPrompt: Prompt?
     @State private var shownPeek = false
+    @State private var shownClipboard = false
     @State private var contentHeight: CGFloat = 0
     @State private var clearTask: Task<Void, Never>?
     @State private var expandTask: Task<Void, Never>?
@@ -324,6 +389,11 @@ struct NotchPromptView: View {
     private static let promptWidth: CGFloat = 520
     // Three columns: 56pt cover + centre + the shelf's fixed 136pt.
     private static let peekWidth: CGFloat = 540
+    /// Wide enough for a two-line text snippet beside a 32pt thumbnail and a
+    /// trailing meta column without either truncating at a glance. 640 plus the
+    /// flares is 664, which the fixed 720pt panel still clears (§6.2 — the
+    /// window is never resized, so this is a hard ceiling, not a suggestion).
+    private static let clipboardWidth: CGFloat = 640
     /// Roughly the physical notch's own bottom corner radius.
     private static let notchBottomRadius: CGFloat = 10
     private static let openBottomRadius: CGFloat = 22
@@ -344,7 +414,11 @@ struct NotchPromptView: View {
 
 
     private var openWidth: CGFloat {
-        (shownPrompt != nil ? Self.promptWidth : Self.peekWidth) + Self.flare * 2
+        let content: CGFloat
+        if shownPrompt != nil { content = Self.promptWidth }
+        else if shownClipboard { content = Self.clipboardWidth }
+        else { content = Self.peekWidth }
+        return content + Self.flare * 2
     }
 
     /// The physical notch, with nothing added.
@@ -354,16 +428,23 @@ struct NotchPromptView: View {
 
     private var hasMiniPlayer: Bool { media.nowPlaying != nil }
 
+    /// The copy acknowledgement, in the right wing. Mirrors the mini player.
+    private var hasCopiedBadge: Bool { clipboard.justCaptured }
+
+    /// Either wing's occupant is enough to open both — see `collapsedWidth`.
+    private var hasWings: Bool { hasMiniPlayer || hasCopiedBadge }
+
     /// Collapsed, the surface grows a wing on each side to make room for the
     /// disc. Symmetric on purpose — growing only leftward would slide the
     /// physical notch off-centre inside the shape, which reads as misalignment
-    /// rather than as the notch widening.
+    /// rather than as the notch widening. That is why a copy badge, which only
+    /// ever occupies the right wing, still opens both.
     private var collapsedWidth: CGFloat {
-        bareNotchWidth + (hasMiniPlayer ? Self.miniWing * 2 : 0)
+        bareNotchWidth + (hasWings ? Self.miniWing * 2 : 0)
     }
 
     private var collapsedHeight: CGFloat {
-        max(NotchGeometry.topInset, 1) + (hasMiniPlayer ? Self.miniExtraHeight : 0)
+        max(NotchGeometry.topInset, 1) + (hasWings ? Self.miniExtraHeight : 0)
     }
 
     private var openHeight: CGFloat { max(contentHeight, collapsedHeight) }
@@ -391,9 +472,10 @@ struct NotchPromptView: View {
 
     /// Collapsed, the shape sits exactly over the physical notch and is
     /// invisible against it. Without a notch there is nothing to hide behind, so
-    /// it fades out instead of parking a black bar on the menu bar.
+    /// it fades out instead of parking a black bar on the menu bar — except
+    /// while the copy badge is up, which needs something to sit on.
     private var surfaceOpacity: Double {
-        isExpanded || NotchGeometry.hasNotch ? 1 : 0
+        isExpanded || NotchGeometry.hasNotch || hasCopiedBadge ? 1 : 0
     }
 
     var body: some View {
@@ -401,11 +483,12 @@ struct NotchPromptView: View {
             shadowLayer
             surface
             miniPlayer
+            copiedBadge
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: coordinator.current?.id) { _, _ in sync() }
-        .onChange(of: coordinator.isPeeking) { _, _ in sync() }
+        .onChange(of: coordinator.idleSurface) { _, _ in sync() }
         .onAppear { sync() }
     }
 
@@ -474,6 +557,44 @@ struct NotchPromptView: View {
         .allowsHitTesting(false)
     }
 
+    /// The copy acknowledgement: a checkmark in the right wing, opposite the
+    /// mini player's disc. Always mounted and driven by opacity and scale rather
+    /// than inserted and removed, exactly like `miniPlayer` — a transition would
+    /// fight the wing that is growing underneath it.
+    ///
+    /// The timing is deliberately staggered against the wing. `containerSpring`
+    /// carries a 0.10s hold while collapsed, so an undelayed badge would pop out
+    /// before the shape had made room for it and hang over the bezel for a
+    /// frame. Arriving 0.12s late lets the wing lead; leaving on a plain ease-in
+    /// lets the badge go *first* and the wing close behind it, which is the same
+    /// choreography `contentFade` uses for the expanded surface.
+    private var copiedBadge: some View {
+        let visible = hasCopiedBadge && !isExpanded
+        return Image(systemName: "checkmark")
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(.white.opacity(0.9))
+            .frame(width: Self.discSize, height: Self.discSize)
+            .background(Circle().fill(.white.opacity(0.14)))
+            // Mirror of the mini player's offset: centred in the usable part of
+            // the right wing, which ends `flare` short of the rect.
+            .offset(
+                x: bareNotchWidth / 2 + (Self.miniWing - Self.flare) / 2,
+                y: (collapsedHeight - Self.discSize) / 2
+            )
+            .opacity(visible ? 1 : 0)
+            .scaleEffect(visible ? 1 : 0.5)
+            .animation(badgeAnimation, value: hasCopiedBadge)
+            .animation(contentFade, value: isExpanded)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    private var badgeAnimation: Animation {
+        hasCopiedBadge
+            ? .spring(response: 0.34, dampingFraction: 0.72).delay(0.12)
+            : .easeIn(duration: 0.12)
+    }
+
     private var content: some View {
         Group {
             if let prompt = shownPrompt {
@@ -482,8 +603,15 @@ struct NotchPromptView: View {
                     // focus state resets when the queue advances rather than
                     // bleeding the last answer into the next question.
                     .id(prompt.id)
+            } else if shownClipboard {
+                ClipboardCard(store: clipboard, coordinator: coordinator)
             } else if shownPeek {
-                PeekCard(coordinator: coordinator, media: media, shelf: shelf)
+                PeekCard(
+                    coordinator: coordinator,
+                    media: media,
+                    shelf: shelf,
+                    clipboard: clipboard
+                )
             }
         }
         .padding(.top, NotchGeometry.topInset + 8)   // clears the camera housing
@@ -516,7 +644,17 @@ struct NotchPromptView: View {
 
     private static let baselineHeight: CGFloat = 150
     private var overhang: CGFloat { max(0, openHeight - Self.baselineHeight) }
-    private var shadowRadius: CGFloat { min(34, 12 + overhang * 0.10) }
+    /// Never ask for more blur than the window can render. The panel is fixed at
+    /// 720 and never resized (§6.2), so at the clipboard's 664pt surface there
+    /// are only 28pt of margin per side — an unclamped 34pt radius draws a
+    /// shadow with a hard vertical cut down both edges.
+    private var shadowRadius: CGFloat {
+        min(
+            34,
+            (NotchPanelController.panelSize.width - openWidth) / 2,
+            12 + overhang * 0.10
+        )
+    }
     private var shadowOffsetY: CGFloat { min(16, 5 + overhang * 0.045) }
     private var shadowOpacity: Double { min(0.55, 0.30 + Double(overhang) * 0.0009) }
 
@@ -528,13 +666,21 @@ struct NotchPromptView: View {
 
         if let prompt = coordinator.current {
             shownPrompt = prompt
-            shownPeek = false
+            setIdleContent(peek: false, clipboard: false)
             expandOnceMeasured()
-        } else if coordinator.isPeeking {
+            return
+        }
+
+        switch coordinator.idleSurface {
+        case .clipboard:
             shownPrompt = nil
-            shownPeek = true
+            setIdleContent(peek: false, clipboard: true)
             expandOnceMeasured()
-        } else {
+        case .peek:
+            shownPrompt = nil
+            setIdleContent(peek: true, clipboard: false)
+            expandOnceMeasured()
+        case .none:
             isExpanded = false
             // Outlive the content fade plus the delayed collapse spring, then
             // drop the content.
@@ -543,7 +689,29 @@ struct NotchPromptView: View {
                 guard !Task.isCancelled else { return }
                 shownPrompt = nil
                 shownPeek = false
+                shownClipboard = false
             }
+        }
+    }
+
+    /// Swapping between two *already open* surfaces is a cross-fade, not an
+    /// expansion: the shape is out and stays out, only the content changes
+    /// hands. `expandOnceMeasured` no-ops in that case (it guards `!isExpanded`),
+    /// so without this the peek→clipboard swap from the chip would be an instant
+    /// hard cut over a shape that is meanwhile springing 564→664.
+    ///
+    /// Deliberately *not* animated when collapsed: `contentFade` already owns
+    /// that transition, and a second animation on the same change double-fades
+    /// it.
+    private func setIdleContent(peek: Bool, clipboard: Bool) {
+        if isExpanded {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                shownPeek = peek
+                shownClipboard = clipboard
+            }
+        } else {
+            shownPeek = peek
+            shownClipboard = clipboard
         }
     }
 
@@ -570,6 +738,9 @@ struct PeekCard: View {
     let coordinator: PromptCoordinator
     let media: MediaMonitor
     let shelf: ShelfStore
+    let clipboard: ClipboardStore
+
+    @State private var clipboardHovered = false
 
     /// Left column is exactly the cover, so the transport underneath lines up
     /// with its edges.
@@ -605,6 +776,7 @@ struct PeekCard: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.white.opacity(0.6))
             Spacer()
+            clipboardChip
             if !coordinator.stranded.isEmpty {
                 Text("\(coordinator.stranded.count) waiting")
                     .font(.caption.weight(.medium))
@@ -614,6 +786,38 @@ struct PeekCard: View {
                     .background(.white.opacity(0.08), in: Capsule())
             }
         }
+    }
+
+    /// The doorway into the clipboard surface, for anyone who hasn't learned
+    /// ⇧⌘V — or whose ⇧⌘V is owned by another app. `RegisterEventHotKey`
+    /// succeeds and then simply never fires when someone else already holds the
+    /// chord, with no API to detect it, so there has to be a way in that can't
+    /// silently break.
+    ///
+    /// A header chip rather than a fourth column beside `ShelfView`: the shelf
+    /// earns its column by being a drop target that needs area, this is one
+    /// button, and the peek has no width to spare — a 76pt column would take the
+    /// centre from 284pt to 192pt and start truncating stranded prompts.
+    /// Deliberately the same visual weight as the "n waiting" badge beside it.
+    private var clipboardChip: some View {
+        Button { coordinator.openClipboard() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: clipboard.items.isEmpty
+                      ? "doc.on.clipboard" : "doc.on.clipboard.fill")
+                if !clipboard.items.isEmpty {
+                    Text("\(clipboard.items.count)").monospacedDigit()
+                }
+            }
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.white.opacity(clipboardHovered ? 0.75 : 0.45))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(.white.opacity(clipboardHovered ? 0.14 : 0.08), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { clipboardHovered = $0 }
+        .animation(.easeOut(duration: 0.14), value: clipboardHovered)
+        .accessibilityLabel("Open clipboard history")
     }
 
     // MARK: Player column
