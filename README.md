@@ -16,7 +16,7 @@
 &nbsp;&nbsp;
 <img src="docs/images/logo-youtube-music.png" width="26" alt="YouTube Music">
 
-macOS 14+ &nbsp;·&nbsp; Swift 6 &nbsp;·&nbsp; SwiftUI + AppKit
+macOS 14+ &nbsp;·&nbsp; Swift 6 &nbsp;·&nbsp; SwiftUI + AppKit &nbsp;·&nbsp; [MIT](LICENSE)
 
 </div>
 
@@ -255,6 +255,12 @@ docs/images/                       README assets
   only. `Stop` is the one place Codex takes free text back.
 - The Electron *YouTube Music Desktop* build isn't scriptable and isn't covered.
 - On a Mac with no notch, the panel falls back to the top edge of the screen.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Aritra Sarkar.
 
 ---
 
