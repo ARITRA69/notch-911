@@ -323,6 +323,19 @@ final class PromptCoordinator {
         setIdleSurface(.clipboard)
     }
 
+    /// The ← in the clipboard heading — hand the surface back to the peek
+    /// rather than collapsing. Deliberately leaves `pointerOnPanel` false even
+    /// though the click proves the pointer is on the panel: no enter event was
+    /// delivered for it (hover reports are swallowed while the clipboard is
+    /// up), so there is no guaranteed exit to clear a latch set here — and a
+    /// stale `true` is exactly the ghost-peek bug `setIdleSurface` warns
+    /// about. The peek simply stays up until the next real hover exit.
+    func backToPeek() {
+        guard idleSurface == .clipboard else { return }
+        dwell?.cancel()
+        setIdleSurface(.peek)
+    }
+
     /// `esc`, a click outside, and copying an item.
     func closeClipboard() {
         guard idleSurface == .clipboard else { return }

@@ -139,6 +139,18 @@ struct ClipboardCard: View {
 
     private var heading: some View {
         HStack(spacing: 4) {
+            // Back to the peek, mirroring the chip that led here. Shown even
+            // when the surface was opened by ⇧⌘V — the peek is the idle hub,
+            // so "back" always has somewhere sensible to go.
+            Button { coordinator.backToPeek() } label: {
+                Image(systemName: "chevron.left")
+                    // The glyph alone is a ~6pt target at the corner of the
+                    // panel; pad the hit area without moving the layout.
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Back to the notch overview")
             Image(systemName: store.items.isEmpty ? "doc.on.clipboard" : "doc.on.clipboard.fill")
             Text(store.items.isEmpty ? "Clipboard" : "\(store.items.count)/\(ClipboardStore.maxItems)")
             Spacer(minLength: 0)
