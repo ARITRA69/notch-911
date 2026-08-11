@@ -11,10 +11,72 @@ import SwiftUI
 struct StatusView: View {
     @Bindable var model: AppModel
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            header
+    /// Three panes rather than one long column. The window used to be a fixed
+    /// 580×640 with everything stacked inside it, which meant the event log was
+    /// clipped off the bottom with no way to reach it — and the clipboard had
+    /// nowhere to live at all beyond a count.
+    enum Tab: String, CaseIterable, Identifiable {
+        case status = "Status"
+        case clipboard = "Clipboard"
+        case events = "Events"
 
+        var id: String { rawValue }
+
+        var symbol: String {
+            switch self {
+            case .status: "gearshape"
+            case .clipboard: "doc.on.clipboard"
+            case .events: "list.bullet.rectangle"
+            }
+        }
+    }
+
+    @State private var tab: Tab = .status
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            tabPicker
+
+            // Each pane scrolls on its own. The log and the clipboard both grow
+            // without bound, so a single outer scroller would leave you hunting
+            // for the settings under a thousand events.
+            ScrollView {
+                Group {
+                    switch tab {
+                    case .status: statusTab
+                    case .clipboard: clipboardTab
+                    case .events: eventsTab
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 4)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .padding(22)
+        // Was a hard `width:height:`, which is what made the content unreachable.
+        // A minimum plus an ideal lets the window open at the old size and be
+        // dragged bigger when a pane has more in it.
+        .frame(minWidth: 560, idealWidth: 600, minHeight: 480, idealHeight: 680,
+               alignment: .topLeading)
+        .background(.background)
+    }
+
+    private var tabPicker: some View {
+        Picker("View", selection: $tab) {
+            ForEach(Tab.allCases) { item in
+                Label(item.rawValue, systemImage: item.symbol).tag(item)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
+    // MARK: - Tabs
+
+    private var statusTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
             card {
                 serverRow
                 rowDivider
@@ -33,14 +95,15 @@ struct StatusView: View {
                 stopRow
                 Divider().padding(.leading, 14)
                 youTubeMusicRow
+                Divider().padding(.leading, 14)
+                clipboardRow
+                Divider().padding(.leading, 14)
+                clipboardStorageRow
             }
-
-            logSection
         }
-        .padding(22)
-        .frame(width: 580, height: 640, alignment: .topLeading)
-        .background(.background)
     }
+
+    private var eventsTab: some View { logSection }
 
     // MARK: - Header
 
@@ -181,6 +244,43 @@ struct StatusView: View {
         )
     }
 
+    private var clipboardRow: some View {
+        toggleRow(
+            isOn: $model.clipboardCapture,
+            title: "Clipboard history",
+            detail: "Keeps the last \(ClipboardStore.maxItems) things you copied, in the notch. "
+                + "Nothing leaves this Mac, and anything an app marks confidential — "
+                + "password managers do — is never captured."
+        )
+    }
+
+    /// The clear button lives in its own row rather than inside `toggleRow`:
+    /// `.toggleStyle(.switch)` puts the switch on the trailing edge of its own
+    /// frame, so squeezing a button in beside it strands the switch mid-row.
+    /// This also gives the hotkey somewhere to report from — a chord another app
+    /// already owns registers successfully and then never fires, so "it's on" is
+    /// worth stating rather than assuming.
+    private var clipboardStorageRow: some View {
+        row(
+            color: clipboardColor,
+            title: "Stored clippings",
+            detail: model.isClipboardHotkeyRegistered
+                ? "\(model.clipboard.items.count) stored · ⇧⌘V opens the notch"
+                : "⇧⌘V could not be registered — another app may own it. "
+                    + "The clipboard button in the notch peek always works."
+        ) {
+            Button("Clear") { model.clearClipboardHistory() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.clipboard.items.isEmpty)
+        }
+    }
+
+    private var clipboardColor: Color {
+        guard model.clipboardCapture else { return .secondary }
+        return model.isClipboardHotkeyRegistered ? .green : .orange
+    }
+
     private func toggleRow(isOn: Binding<Bool>, title: String, detail: String) -> some View {
         Toggle(isOn: isOn) {
             VStack(alignment: .leading, spacing: 2) {
@@ -194,6 +294,135 @@ struct StatusView: View {
         .toggleStyle(.switch)
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
+    }
+
+    // MARK: - Clipboard
+
+    /// Everything the notch is holding, at a size you can actually read — the
+    /// notch surface is a picker you glance at, this is where you go to see what
+    /// is in there and throw things out.
+    private var clipboardTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("\(model.clipboard.items.count) of \(ClipboardStore.maxItems)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if !model.clipboardCapture {
+                    Label("Capture is off", systemImage: "pause.circle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+                Button("Clear all") { model.clearClipboardHistory() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(model.clipboard.items.isEmpty)
+            }
+
+            if model.clipboard.items.isEmpty {
+                emptyClipboard
+            } else {
+                card {
+                    ForEach(Array(model.clipboard.items.enumerated()), id: \.element.id) { index, item in
+                        if index > 0 { Divider().padding(.leading, 56) }
+                        clipRow(item)
+                    }
+                }
+            }
+        }
+    }
+
+    private var emptyClipboard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(model.clipboardCapture ? "Nothing copied yet." : "Clipboard history is off.")
+                .font(.callout.weight(.medium))
+            Text(model.clipboardCapture
+                 ? "Copy anything and it shows up here, newest first. ⇧⌘V opens the notch."
+                 : "Turn it on under Status to start keeping what you copy.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(cardShape.fill(.background.secondary))
+        .overlay(cardShape.strokeBorder(.separator.opacity(0.5), lineWidth: 1))
+    }
+
+    private func clipRow(_ item: ClipItem) -> some View {
+        let isStale = ClipboardStore.isStale(item)
+        return HStack(spacing: 12) {
+            clipThumbnail(item)
+                .frame(width: 32, height: 32)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .opacity(isStale ? 0.4 : 1)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(ClipboardStore.preview(for: item))
+                    .font(.callout)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(isStale ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                    .textSelection(.enabled)
+
+                HStack(spacing: 5) {
+                    if let icon = model.clipboard.sourceIcon(for: item) {
+                        Image(nsImage: icon).resizable().frame(width: 11, height: 11)
+                    }
+                    Text(clipCaption(item))
+                }
+                .font(.caption)
+                .foregroundStyle(isStale ? AnyShapeStyle(Color.orange.opacity(0.8)) : AnyShapeStyle(.secondary))
+            }
+
+            Spacer(minLength: 8)
+
+            // Puts it back on the pasteboard without going through the notch —
+            // the same `copy` the card uses, so the auto-generated marker and
+            // the change-count bookkeeping come along with it.
+            Button("Copy") { model.clipboard.copy(item) }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isStale)
+
+            Button {
+                model.clipboard.remove(item)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Remove this clipping")
+            .accessibilityLabel("Remove this clipping")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private func clipCaption(_ item: ClipItem) -> String {
+        var parts: [String] = []
+        parts.append(ClipboardStore.isStale(item) ? "File missing" : item.kind.label)
+        if let name = item.source?.name { parts.append(name) }
+        parts.append(Self.clock.string(from: item.lastCopiedAt))
+        if item.copyCount > 1 { parts.append("copied \(item.copyCount)×") }
+        return parts.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private func clipThumbnail(_ item: ClipItem) -> some View {
+        if let image = model.clipboard.thumbnails[item.id] {
+            Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+        } else if item.kind == .files, let url = item.urls.first {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                .resizable().aspectRatio(contentMode: .fit)
+        } else {
+            ZStack {
+                Rectangle().fill(.background.secondary)
+                Image(systemName: item.kind.symbol)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func errorBox(_ message: String) -> some View {
@@ -245,7 +474,11 @@ struct StatusView: View {
                 }
             }
 
-            ScrollView {
+            // No inner `ScrollView` any more: this pane already lives inside the
+            // window's scroller, and a nested one gives you two scrollbars, a
+            // fixed-height window inside a resizable one, and a wheel that
+            // scrolls whichever container the pointer happens to be over.
+            Group {
                 if model.log.isEmpty {
                     Text("Nothing yet — prompts show up here as they arrive.")
                         .font(.caption)
@@ -253,7 +486,7 @@ struct StatusView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12)
                 } else {
-                    LazyVStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 5) {
                         ForEach(model.log.reversed()) { entry in
                             HStack(alignment: .firstTextBaseline, spacing: 10) {
                                 Text(Self.clock.string(from: entry.at))
@@ -270,11 +503,10 @@ struct StatusView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
             .background(cardShape.fill(.background.secondary))
             .overlay(cardShape.strokeBorder(.separator.opacity(0.5), lineWidth: 1))
         }
-        .frame(maxHeight: .infinity)
     }
 
     // MARK: - Building blocks
