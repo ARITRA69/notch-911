@@ -113,7 +113,7 @@ final class AppModel {
     @ObservationIgnored private var codexSubmissionTimeouts: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var codexSubmissionCancellations: [String: CodexSubmissionCancellation] = [:]
     @ObservationIgnored
-    private let logger = Logger(subsystem: "com.aritra69.notch-911", category: "AppModel")
+    private let logger = Logger(subsystem: "com.aritra360.notch-911", category: "AppModel")
 
     /// M0 only. §5.4 puts this in the Keychain, which lands in M3.
     @ObservationIgnored private let token: String = {

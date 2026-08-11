@@ -5,18 +5,28 @@ identity_name="notch-911 Local Development"
 bundle_identifier="com.aritra69.notch-911"
 script_directory="${0:A:h}"
 repository_directory="${script_directory:h}"
-derived_data="${TMPDIR%/}/notch-911-local-signed-derived-data"
-source_app="${derived_data}/Build/Products/Debug/notch-911.app"
 installed_app="/Applications/notch-911.app"
 backup_directory="${HOME}/Library/Application Support/notch-911/Backups"
 reset_accessibility=false
+configuration=Debug
 
-if [[ "${1:-}" == "--reset-accessibility" ]]; then
-    reset_accessibility=true
-elif [[ -n "${1:-}" ]]; then
-    print -u2 "Usage: ${0:t} [--reset-accessibility]"
-    exit 2
-fi
+# Both flags, in any order, so --release --reset-accessibility works the way
+# you would expect it to.
+for argument in "$@"; do
+    case "${argument}" in
+        --reset-accessibility) reset_accessibility=true ;;
+        --release) configuration=Release ;;
+        *)
+            print -u2 "Usage: ${0:t} [--release] [--reset-accessibility]"
+            exit 2
+            ;;
+    esac
+done
+
+# Separate derived data per configuration. Sharing one would make every switch
+# between Debug and Release a full rebuild.
+derived_data="${TMPDIR%/}/notch-911-local-signed-derived-data-${configuration:l}"
+source_app="${derived_data}/Build/Products/${configuration}/notch-911.app"
 
 if ! /usr/bin/security find-identity -v -p codesigning \
     | /usr/bin/grep -Fq "${identity_name}"; then
@@ -25,11 +35,11 @@ if ! /usr/bin/security find-identity -v -p codesigning \
     exit 1
 fi
 
-print "Building notch-911…"
+print "Building notch-911 (${configuration})…"
 /usr/bin/xcodebuild \
     -project "${repository_directory}/notch-911.xcodeproj" \
     -scheme notch-911 \
-    -configuration Debug \
+    -configuration "${configuration}" \
     -derivedDataPath "${derived_data}" \
     CODE_SIGNING_ALLOWED=NO \
     ENABLE_DEBUG_DYLIB=NO \
