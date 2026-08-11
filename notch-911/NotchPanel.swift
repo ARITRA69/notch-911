@@ -19,8 +19,8 @@ final class NotchPanel: NSPanel {
     /// `.nonactivatingPanel` it takes keys *without* activating the app.
     ///
     /// Flipped per surface by the controller rather than left permanently on.
-    /// `setVisible(false)` defers `orderOut` by 600ms so the collapse spring can
-    /// finish, and a panel that stays key for those 600ms eats whatever the user
+    /// `setVisible(false)` defers `orderOut` by 800ms so the collapse spring can
+    /// finish, and a panel that stays key for those 800ms eats whatever the user
     /// types straight after their own `esc` — which, for a surface summoned by a
     /// global hotkey, is exactly when they are mid-sentence. A keypress that
     /// silently disappears is worse than one that beeps.
@@ -200,9 +200,10 @@ final class NotchPanelController: NSObject {
             // mid-flight. Let the spring finish shrinking the surface back into
             // the notch first, then remove the window.
             hideTask = Task { [panel] in
-                // Content fade (0.12) + the collapse spring's 0.10 hold + its
-                // 0.32 response, with a little slack for the settle.
-                try? await Task.sleep(for: .milliseconds(600))
+                // The collapse spring's 0.05 hold + its 0.42 response, with
+                // slack for the settle tail — cutting the window mid-tail
+                // clips the last few pixels of travel.
+                try? await Task.sleep(for: .milliseconds(800))
                 guard !Task.isCancelled else { return }
                 panel.orderOut(nil)
             }
@@ -452,13 +453,17 @@ struct NotchPromptView: View {
     private var surfaceWidth: CGFloat { isExpanded ? openWidth : collapsedWidth }
     private var surfaceHeight: CGFloat { isExpanded ? openHeight : collapsedHeight }
 
-    /// §7.1: expand overshoots slightly — it's the signature moment. Collapse is
-    /// faster and flatter, because it's getting out of the way, and is held back
-    /// briefly so the content has already faded before the shape starts moving.
+    /// §7.1: expand overshoots slightly — it's the signature moment. Collapse
+    /// keeps the same response so closing reads as the same element travelling
+    /// back, not a hard cut: at 0.32s with a 0.10s hold, most of the visible
+    /// area change landed inside 150ms and `esc` felt like the panel simply
+    /// vanishing. Flatter damping than the open because an overshoot on exit
+    /// looks like a bounce off the bezel; the short hold gives the content
+    /// fade a head start without reading as a hiccup.
     private var containerSpring: Animation {
         isExpanded
             ? .spring(response: 0.42, dampingFraction: 0.78)
-            : .spring(response: 0.32, dampingFraction: 0.88).delay(0.10)
+            : .spring(response: 0.42, dampingFraction: 0.86).delay(0.05)
     }
 
     /// Content arrives only once the container has *finished* growing. §7.1's
@@ -685,7 +690,7 @@ struct NotchPromptView: View {
             // Outlive the content fade plus the delayed collapse spring, then
             // drop the content.
             clearTask = Task {
-                try? await Task.sleep(for: .milliseconds(600))
+                try? await Task.sleep(for: .milliseconds(800))
                 guard !Task.isCancelled else { return }
                 shownPrompt = nil
                 shownPeek = false
