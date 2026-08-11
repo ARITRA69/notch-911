@@ -109,14 +109,12 @@ struct StatusView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.tint.opacity(0.16))
-                .frame(width: 40, height: 40)
-                .overlay {
-                    Image(systemName: "rectangle.topthird.inset.filled")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(.tint)
-                }
+            // The real app icon, not a drawn stand-in. A macOS icon carries its
+            // own margin inside the canvas, so 46pt lands at the visual weight
+            // the old 40pt tile had.
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 46, height: 46)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("notch-911")
