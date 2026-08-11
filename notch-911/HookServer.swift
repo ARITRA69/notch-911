@@ -51,8 +51,8 @@ nonisolated final class HookServer: @unchecked Sendable {
     /// Ports tried in order before falling back to a kernel-assigned one.
     private static let preferredPorts: [UInt16] = Array(8917...8926)
 
-    private let queue = DispatchQueue(label: "com.aritra69.notch-911.hookserver")
-    private let log = Logger(subsystem: "com.aritra69.notch-911", category: "HookServer")
+    private let queue = DispatchQueue(label: "com.aritra360.notch-911.hookserver")
+    private let log = Logger(subsystem: "com.aritra360.notch-911", category: "HookServer")
     private let token: String
     private let handler: @Sendable (Request) async -> Response
 

@@ -43,7 +43,7 @@ final class ShelfStore {
     private(set) var isFull = false
 
     @ObservationIgnored
-    private let log = Logger(subsystem: "com.aritra69.notch-911", category: "Shelf")
+    private let log = Logger(subsystem: "com.aritra360.notch-911", category: "Shelf")
 
     @ObservationIgnored
     private var storageDirectory: URL {

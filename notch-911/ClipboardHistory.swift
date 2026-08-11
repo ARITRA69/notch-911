@@ -404,7 +404,7 @@ final class ClipboardStore {
     @ObservationIgnored private var flashTask: Task<Void, Never>?
     @ObservationIgnored private var captureFlashTask: Task<Void, Never>?
     @ObservationIgnored
-    private let log = Logger(subsystem: "com.aritra69.notch-911", category: "Clipboard")
+    private let log = Logger(subsystem: "com.aritra360.notch-911", category: "Clipboard")
 
     /// The directory is injectable purely so the tests get a temp dir —
     /// `ShelfStore` hardcodes its path, which is exactly why it has none. The

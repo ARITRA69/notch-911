@@ -2,7 +2,7 @@
 set -euo pipefail
 
 identity_name="notch-911 Local Development"
-bundle_identifier="com.aritra69.notch-911"
+bundle_identifier="com.aritra360.notch-911"
 script_directory="${0:A:h}"
 repository_directory="${script_directory:h}"
 installed_app="/Applications/notch-911.app"

@@ -6,7 +6,7 @@ struct CodeSignatureInspectorTests {
     @Test("Recognizes the persistent local authority")
     func stableAuthority() {
         let status = CodeSignatureInspector.parse("""
-        Identifier=com.aritra69.notch-911
+        Identifier=com.aritra360.notch-911
         Authority=notch-911 Local Development
         TeamIdentifier=not set
         """)

@@ -143,8 +143,8 @@ nonisolated final class MediaController: @unchecked Sendable {
         UserDefaults.standard.bool(forKey: Self.youTubeMusicDefaultsKey)
     }
 
-    private let queue = DispatchQueue(label: "com.aritra69.notch-911.media")
-    private let log = Logger(subsystem: "com.aritra69.notch-911", category: "Media")
+    private let queue = DispatchQueue(label: "com.aritra360.notch-911.media")
+    private let log = Logger(subsystem: "com.aritra360.notch-911", category: "Media")
 
     /// Field separator — ASCII unit separator, which cannot appear in a track name.
     private static let separator = "\u{1F}"
