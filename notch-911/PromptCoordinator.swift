@@ -86,6 +86,16 @@ final class PromptCoordinator {
     @ObservationIgnored private var dwell: Task<Void, Never>?
     @ObservationIgnored private var pointerOnSensor = false
     @ObservationIgnored private var pointerOnPanel = false
+    /// Set when the peek is reached by an explicit act — the clipboard's back
+    /// button — rather than by hover. A hover-opened peek closes when the
+    /// pointer leaves, but a navigated-to peek may never have had the pointer
+    /// inside at all: the clipboard is 100pt wider, so the very button that
+    /// summoned the peek sits outside the peek's footprint, and the width
+    /// change evicts the pointer mid-swap. Closing on that "exit" slams the
+    /// surface shut half a second after the user asked for it. The hold lasts
+    /// until the pointer genuinely touches the peek or the sensor once; from
+    /// then on the normal hover-to-close rules apply.
+    @ObservationIgnored private var peekAwaitsPointer = false
 
     @ObservationIgnored private var waiting: [Prompt] = [] {
         didSet { stranded = waiting }
@@ -299,6 +309,10 @@ final class PromptCoordinator {
         idleSurface = surface
         if surface != .peek {
             pointerOnPanel = false
+            // The pointer hold is a property of one navigated-to peek; any
+            // other surface change retires it so a later hover-opened peek
+            // can't inherit an exemption from its own close rule.
+            peekAwaitsPointer = false
             if wasPeeking { onPeekChange?(false) }
         } else if !wasPeeking {
             onPeekChange?(true)
@@ -324,15 +338,15 @@ final class PromptCoordinator {
     }
 
     /// The ← in the clipboard heading — hand the surface back to the peek
-    /// rather than collapsing. Deliberately leaves `pointerOnPanel` false even
-    /// though the click proves the pointer is on the panel: no enter event was
-    /// delivered for it (hover reports are swallowed while the clipboard is
-    /// up), so there is no guaranteed exit to clear a latch set here — and a
-    /// stale `true` is exactly the ghost-peek bug `setIdleSurface` warns
-    /// about. The peek simply stays up until the next real hover exit.
+    /// rather than collapsing. The pointer latch is deliberately left alone:
+    /// no enter event was delivered while the clipboard owned the surface, so
+    /// a latch set here would have no guaranteed exit to clear it. Instead the
+    /// peek is marked as awaiting the pointer, which suspends hover-to-close
+    /// until the user actually reaches it — see `peekAwaitsPointer`.
     func backToPeek() {
         guard idleSurface == .clipboard else { return }
         dwell?.cancel()
+        peekAwaitsPointer = true
         setIdleSurface(.peek)
     }
 
@@ -351,6 +365,7 @@ final class PromptCoordinator {
     /// The pointer entered or left the notch sensor.
     func hoverChanged(_ hovering: Bool) {
         pointerOnSensor = hovering
+        if hovering { peekAwaitsPointer = false }
         evaluateHover()
     }
 
@@ -373,6 +388,7 @@ final class PromptCoordinator {
     /// The pointer entered or left the expanded panel.
     func peekHoverChanged(_ hovering: Bool) {
         pointerOnPanel = hovering
+        if hovering { peekAwaitsPointer = false }
         evaluateHover()
     }
 
@@ -402,8 +418,11 @@ final class PromptCoordinator {
         } else {
             // Only the peek closes on pointer exit. The clipboard was opened by
             // an explicit act and is dismissed by one — moving the mouse away to
-            // read something is not a decision to close it.
-            guard idleSurface == .peek else { return }
+            // read something is not a decision to close it. A peek still
+            // awaiting the pointer is in the same category: the user navigated
+            // to it, and the pointer "leaving" a surface it never entered is
+            // the width-change eviction, not a decision.
+            guard idleSurface == .peek, !peekAwaitsPointer else { return }
             dwell = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(Self.peekCloseGraceMilliseconds))
                 guard !Task.isCancelled, let self, idleSurface == .peek else { return }

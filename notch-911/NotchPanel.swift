@@ -103,6 +103,8 @@ final class NotchPanelController: NSObject {
 
     private let panel: NotchPanel
     private let sensor: HoverSensorPanel
+    /// A sacrificial key window — see `evictKey()`.
+    private let keySink: NotchPanel
     private let coordinator: PromptCoordinator
     private let media: MediaMonitor
 
@@ -168,11 +170,48 @@ final class NotchPanelController: NSObject {
         hosting.frame = CGRect(origin: .zero, size: Self.panelSize)
         panel.contentView = hosting
 
+        // Invisible on purpose: one point, fully transparent, at the panel's
+        // own level so ordering it front never rearranges anything the user
+        // can see. Its entire job is to be a window that key status can pass
+        // through on its way back to the user's app — see `evictKey`.
+        keySink = NotchPanel(
+            contentRect: CGRect(x: 0, y: 0, width: 1, height: 1),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        keySink.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
+        keySink.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        keySink.isOpaque = false
+        keySink.backgroundColor = .clear
+        keySink.hasShadow = false
+        keySink.alphaValue = 0
+        keySink.isMovable = false
+        keySink.hidesOnDeactivate = false
+        keySink.isReleasedWhenClosed = false
+        keySink.acceptsKeyboard = true
+
         super.init()
         panel.delegate = self
 
         reposition()
         sensor.orderFrontRegardless()
+    }
+
+    /// Takes key status away from the panel without taking the panel off the
+    /// screen. `orderOut` is the only supported way to make a window resign
+    /// key, but macOS animates window ordering — ordering the panel out and
+    /// straight back re-renders the whole surface with a system fade-out and
+    /// fade-in, which on a surface swap reads as the panel blinking away and
+    /// popping back. So the eviction is done with a sacrifice instead: an
+    /// invisible one-point panel briefly becomes key (nonactivating, so the
+    /// app never activates) and is immediately ordered out. The system
+    /// animates a window nobody can see, and key status settles back on the
+    /// user's own app — the visible panel never moves.
+    private func evictKey() {
+        guard panel.isKeyWindow else { return }
+        keySink.makeKeyAndOrderFront(nil)
+        keySink.orderOut(nil)
     }
 
     private var hideTask: Task<Void, Never>?
@@ -184,18 +223,12 @@ final class NotchPanelController: NSObject {
         // sensor with it, or the wings aren't hoverable.
         repositionSensor()
         guard visible else {
-            // The collapse runs for another 600ms but the keyboard has to go
-            // back *now*. `orderOut` is the only supported way to resign key, so
-            // do exactly that and immediately re-front: with `acceptsKeyboard`
-            // already false the panel returns purely as a display surface and
-            // the spring finishes on screen. Both calls land in the same runloop
-            // turn, so there is nothing to see.
-            let wasKey = panel.isKeyWindow
+            // The collapse runs on for most of a second but the keyboard has
+            // to go back *now* — a panel that stays key eats whatever the
+            // user types straight after their own `esc`. Evicted via the key
+            // sink so the panel itself never leaves the screen mid-collapse.
             panel.acceptsKeyboard = false
-            if wasKey {
-                panel.orderOut(nil)
-                panel.orderFrontRegardless()
-            }
+            evictKey()
             // Ordering the window out immediately would kill the collapse
             // mid-flight. Let the spring finish shrinking the surface back into
             // the notch first, then remove the window.
@@ -224,12 +257,15 @@ final class NotchPanelController: NSObject {
             panel.makeKeyAndOrderFront(nil)
         } else {
             // `canBecomeKey` going false does *not* evict a window that is
-            // already key — only `orderOut` does. This branch is reachable while
-            // the panel stays on screen for the collapsed mini player, so
-            // closing the clipboard with music playing would otherwise leave the
-            // panel holding the keyboard indefinitely, swallowing every key the
-            // user pressed next — including the ⌘V they opened it to press.
-            if panel.isKeyWindow { panel.orderOut(nil) }
+            // already key. This branch is reachable on a clipboard→peek swap
+            // and while the panel stays on screen for the collapsed mini
+            // player, so closing the clipboard with music playing would
+            // otherwise leave the panel holding the keyboard indefinitely,
+            // swallowing every key the user pressed next — including the ⌘V
+            // they opened it to press. Evicted via the key sink: ordering the
+            // panel itself out and back showed up as the whole surface
+            // blinking away in the middle of the swap animation.
+            evictKey()
             panel.orderFrontRegardless()
         }
     }
