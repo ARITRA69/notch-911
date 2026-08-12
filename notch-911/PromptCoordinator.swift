@@ -21,6 +21,9 @@ nonisolated enum IdleSurface: Sendable, Equatable {
     /// Clipboard history. Only ever opened by an explicit act — ⇧⌘V or the chip
     /// in the peek — which is what earns it the keyboard.
     case clipboard
+    /// The Snake board. Deliberately has no hotkey: the clipboard is something
+    /// you summon over whatever you were doing, a game is somewhere you go.
+    case game
     case none
 }
 
@@ -66,7 +69,9 @@ final class PromptCoordinator {
     /// Surfaces allowed to take the keyboard. A peek never may: it opens on
     /// hover alone, and swallowing the next keystroke meant for the user's
     /// editor is the one unforgivable thing a hover surface can do.
-    var wantsKeyboard: Bool { current != nil || idleSurface == .clipboard }
+    var wantsKeyboard: Bool {
+        current != nil || idleSurface == .clipboard || idleSurface == .game
+    }
 
     /// Fires as the peek opens and closes, so pollers can run only while the
     /// surface is on screen.
@@ -343,8 +348,22 @@ final class PromptCoordinator {
     /// a latch set here would have no guaranteed exit to clear it. Instead the
     /// peek is marked as awaiting the pointer, which suspends hover-to-close
     /// until the user actually reaches it — see `peekAwaitsPointer`.
+    func openGame() {
+        guard current == nil, idleSurface != .game else { return }
+        dwell?.cancel()
+        setIdleSurface(.game)
+    }
+
+    /// `esc`, and the panel losing key. Collapses outright for the same reason
+    /// the clipboard does.
+    func closeGame() {
+        guard idleSurface == .game else { return }
+        dwell?.cancel()
+        setIdleSurface(.none)
+    }
+
     func backToPeek() {
-        guard idleSurface == .clipboard else { return }
+        guard idleSurface == .clipboard || idleSurface == .game else { return }
         dwell?.cancel()
         peekAwaitsPointer = true
         setIdleSurface(.peek)
