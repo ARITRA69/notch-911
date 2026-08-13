@@ -41,6 +41,10 @@ Package.resolved
 *.xcresult/
 TestResults/
 
+# Coverage counters, dropped in the working directory by instrumented binaries
+*.profraw
+*.profdata
+
 # Playgrounds
 timeline.xctimeline
 playground.xcworkspace
