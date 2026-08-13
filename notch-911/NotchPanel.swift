@@ -301,8 +301,13 @@ extension NotchPanelController: NSWindowDelegate {
     /// the world.
     nonisolated func windowDidResignKey(_ notification: Notification) {
         MainActor.assumeIsolated {
-            guard coordinator.idleSurface == .clipboard else { return }
-            coordinator.closeClipboard()
+            switch coordinator.idleSurface {
+            case .clipboard: coordinator.closeClipboard()
+            // Same reasoning, and no loss: the game object outlives the
+            // surface, so reopening resumes the stage mid-roll.
+            case .game: coordinator.closeGame()
+            case .peek, .none: break
+            }
         }
     }
 }
@@ -411,8 +416,14 @@ struct NotchPromptView: View {
     /// clearing it the moment the user answers would empty the surface and make
     /// it snap shut instead of shrinking back into the notch.
     @State private var shownPrompt: Prompt?
-    @State private var shownPeek = false
-    @State private var shownClipboard = false
+    /// Which idle surface is being rendered. One value rather than a flag each:
+    /// at three surfaces, independent flags start admitting combinations that
+    /// cannot exist.
+    @State private var shownIdle: IdleSurface = .none
+    /// Created the first time the game is opened, and kept afterwards so
+    /// closing the notch mid-run is a pause rather than a loss. Nothing about
+    /// it is built for anyone who never opens it.
+    @State private var snake: SnakeGame?
     @State private var contentHeight: CGFloat = 0
     @State private var clearTask: Task<Void, Never>?
     @State private var expandTask: Task<Void, Never>?
@@ -431,6 +442,11 @@ struct NotchPromptView: View {
     /// flares is 664, which the fixed 720pt panel still clears (§6.2 — the
     /// window is never resized, so this is a hard ceiling, not a suggestion).
     private static let clipboardWidth: CGFloat = 640
+    /// Whatever the board needs, plus the card's own horizontal padding.
+    /// Derived rather than typed out: the grid cannot be squeezed to fit a
+    /// number chosen here without cells landing on fractional points.
+    private static let gameWidth: CGFloat =
+        SnakeGameView.displaySize.width + 32
     /// Roughly the physical notch's own bottom corner radius.
     private static let notchBottomRadius: CGFloat = 10
     private static let openBottomRadius: CGFloat = 22
@@ -453,7 +469,8 @@ struct NotchPromptView: View {
     private var openWidth: CGFloat {
         let content: CGFloat
         if shownPrompt != nil { content = Self.promptWidth }
-        else if shownClipboard { content = Self.clipboardWidth }
+        else if shownIdle == .clipboard { content = Self.clipboardWidth }
+        else if shownIdle == .game { content = Self.gameWidth }
         else { content = Self.peekWidth }
         return content + Self.flare * 2
     }
@@ -644,9 +661,11 @@ struct NotchPromptView: View {
                     // focus state resets when the queue advances rather than
                     // bleeding the last answer into the next question.
                     .id(prompt.id)
-            } else if shownClipboard {
+            } else if shownIdle == .game, let snake {
+                SnakeSurface(coordinator: coordinator, game: snake)
+            } else if shownIdle == .clipboard {
                 ClipboardCard(store: clipboard, coordinator: coordinator)
-            } else if shownPeek {
+            } else if shownIdle == .peek {
                 PeekCard(
                     coordinator: coordinator,
                     media: media,
@@ -676,7 +695,7 @@ struct NotchPromptView: View {
         // re-renders the card, and hover state attached to the card itself gets
         // dropped in the rebuild — so pressing play would collapse the panel.
         .onHover { hovering in
-            guard shownPeek else { return }
+            guard shownIdle == .peek else { return }
             coordinator.peekHoverChanged(hovering)
         }
     }
@@ -707,19 +726,26 @@ struct NotchPromptView: View {
 
         if let prompt = coordinator.current {
             shownPrompt = prompt
-            setIdleContent(peek: false, clipboard: false)
+            setIdleContent(.none)
             expandOnceMeasured()
             return
         }
 
         switch coordinator.idleSurface {
+        case .game:
+            shownPrompt = nil
+            // Built here rather than with the panel: nothing about the board
+            // costs anything to someone who never opens the game.
+            if snake == nil { snake = SnakeGame() }
+            setIdleContent(.game)
+            expandOnceMeasured()
         case .clipboard:
             shownPrompt = nil
-            setIdleContent(peek: false, clipboard: true)
+            setIdleContent(.clipboard)
             expandOnceMeasured()
         case .peek:
             shownPrompt = nil
-            setIdleContent(peek: true, clipboard: false)
+            setIdleContent(.peek)
             expandOnceMeasured()
         case .none:
             isExpanded = false
@@ -729,8 +755,7 @@ struct NotchPromptView: View {
                 try? await Task.sleep(for: .milliseconds(800))
                 guard !Task.isCancelled else { return }
                 shownPrompt = nil
-                shownPeek = false
-                shownClipboard = false
+                shownIdle = .none
             }
         }
     }
@@ -744,15 +769,11 @@ struct NotchPromptView: View {
     /// Deliberately *not* animated when collapsed: `contentFade` already owns
     /// that transition, and a second animation on the same change double-fades
     /// it.
-    private func setIdleContent(peek: Bool, clipboard: Bool) {
+    private func setIdleContent(_ surface: IdleSurface) {
         if isExpanded {
-            withAnimation(.easeInOut(duration: 0.16)) {
-                shownPeek = peek
-                shownClipboard = clipboard
-            }
+            withAnimation(.easeInOut(duration: 0.16)) { shownIdle = surface }
         } else {
-            shownPeek = peek
-            shownClipboard = clipboard
+            shownIdle = surface
         }
     }
 
@@ -782,6 +803,7 @@ struct PeekCard: View {
     let clipboard: ClipboardStore
 
     @State private var clipboardHovered = false
+    @State private var gameHovered = false
 
     /// Left column is exactly the cover, so the transport underneath lines up
     /// with its edges.
@@ -817,6 +839,7 @@ struct PeekCard: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.white.opacity(0.6))
             Spacer()
+            gameChip
             clipboardChip
             if !coordinator.stranded.isEmpty {
                 Text("\(coordinator.stranded.count) waiting")
@@ -859,6 +882,25 @@ struct PeekCard: View {
         .onHover { clipboardHovered = $0 }
         .animation(.easeOut(duration: 0.14), value: clipboardHovered)
         .accessibilityLabel("Open clipboard history")
+    }
+
+    /// The way into Snake. Glyph only, and the quietest thing in the row: it is
+    /// the one surface here nobody needs, and a peek that advertises a game
+    /// louder than the prompts it exists to show would have its priorities
+    /// backwards.
+    private var gameChip: some View {
+        Button { coordinator.openGame() } label: {
+            Image(systemName: "square.grid.3x3.fill")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.white.opacity(gameHovered ? 0.7 : 0.35))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(.white.opacity(gameHovered ? 0.14 : 0.08), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { gameHovered = $0 }
+        .animation(.easeOut(duration: 0.14), value: gameHovered)
+        .accessibilityLabel("Play Snake")
     }
 
     // MARK: Player column

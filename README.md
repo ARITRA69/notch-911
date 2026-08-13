@@ -195,6 +195,15 @@ moves — but it does mean the app is no longer doing literally nothing when idl
 > detect it — so the status window reports whether it registered, and the peek
 > chip is always there as a way in that can't silently break.
 
+
+### Snake Game
+
+<div align="center">
+  <img src="docs/images/notch-snake-game.png" width="500" alt="Snake mini game">
+</div>
+
+A mini snake game to keep you busy while working 
+
 ---
 
 ## The status window
