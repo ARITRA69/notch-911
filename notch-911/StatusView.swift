@@ -124,6 +124,73 @@ struct StatusView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            Spacer(minLength: 8)
+
+            updateButton
+        }
+    }
+
+    /// Icon only; the tooltip carries the whole story. One control does both
+    /// jobs — it runs the check, and once something turns up it opens the
+    /// release page, so a found update is never stranded in the app menu.
+    private var updateButton: some View {
+        let checker = UpdateChecker.shared
+        return Button {
+            if let update = checker.available {
+                checker.open(update)
+            } else {
+                checker.checkNow()
+            }
+        } label: {
+            Group {
+                if checker.isChecking {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: updateSymbol)
+                        .imageScale(.large)
+                        .foregroundStyle(updateTint)
+                }
+            }
+            .frame(width: 22, height: 22)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.borderless)
+        .help(updateTooltip)
+        .animation(.easeInOut(duration: 0.15), value: checker.isChecking)
+        .animation(.easeInOut(duration: 0.15), value: updateSymbol)
+    }
+
+    private var updateSymbol: String {
+        let checker = UpdateChecker.shared
+        if checker.available != nil { return "arrow.down.circle.fill" }
+        switch checker.lastOutcome {
+        case .upToDate: return "checkmark.circle.fill"
+        case .unreachable: return "exclamationmark.triangle.fill"
+        case nil: return "arrow.clockwise"
+        }
+    }
+
+    private var updateTint: Color {
+        let checker = UpdateChecker.shared
+        if checker.available != nil { return .accentColor }
+        switch checker.lastOutcome {
+        case .upToDate: return .green
+        case .unreachable: return .orange
+        case nil: return .secondary
+        }
+    }
+
+    private var updateTooltip: String {
+        let checker = UpdateChecker.shared
+        if let update = checker.available {
+            return "Version \(update.version) is available — open the release page"
+        }
+        if checker.isChecking { return "Checking for updates…" }
+        switch checker.lastOutcome {
+        case .upToDate: return "Up to date (v\(UpdateChecker.currentVersion))"
+        case .unreachable: return "Couldn't reach GitHub — click to try again"
+        case nil: return "Check for updates (v\(UpdateChecker.currentVersion))"
         }
     }
 

@@ -25,6 +25,28 @@ build_dir="${repo_dir}/build/release"
 dist_dir="${repo_dir}/dist"
 app="${build_dir}/Build/Products/Release/notch-911.app"
 dmg="${dist_dir}/notch-911-${version}.dmg"
+project_file="${repo_dir}/notch-911.xcodeproj/project.pbxproj"
+
+# Write the version down, don't just pass it in. The xcodebuild override below
+# only governs *this* build; every other one — Xcode, the local install script,
+# a plain `xcodebuild` — falls back to what the project file says. Left behind,
+# that number outranks the newest tag and the update check goes silent on every
+# non-release build.
+echo "Setting project version to ${version}…"
+sed -i '' \
+    -e "s/MARKETING_VERSION = [^;]*;/MARKETING_VERSION = ${version};/g" \
+    -e "s/CURRENT_PROJECT_VERSION = [^;]*;/CURRENT_PROJECT_VERSION = ${version};/g" \
+    "${project_file}"
+
+# A rewrite that quietly matched nothing would ship a DMG whose name and
+# contents disagree, which is the exact failure this is here to prevent.
+version_pattern="${version//./\\.}"
+settings_total="$(grep -cE '(MARKETING_VERSION|CURRENT_PROJECT_VERSION) = ' "${project_file}" || true)"
+settings_set="$(grep -cE "(MARKETING_VERSION|CURRENT_PROJECT_VERSION) = ${version_pattern};" "${project_file}" || true)"
+if [[ "${settings_set}" -eq 0 || "${settings_set}" -ne "${settings_total}" ]]; then
+    echo "Version rewrite missed: ${settings_set}/${settings_total} settings say ${version}" >&2
+    exit 1
+fi
 
 echo "Building notch-911 ${version} (Release)…"
 rm -rf "${build_dir}"
@@ -86,3 +108,11 @@ fi
 echo
 echo "DMG:    ${dmg}"
 echo "sha256: $(shasum -a 256 "${dmg}" | awk '{print $1}')"
+
+# The rewrite above is a working-tree change. Releasing without committing it
+# puts the tag on a commit that still claims the previous version.
+if command -v git >/dev/null 2>&1 \
+    && ! git -C "${repo_dir}" diff --quiet -- "${project_file}" 2>/dev/null; then
+    echo
+    echo "note:   project.pbxproj now says ${version} — commit it with the release."
+fi
