@@ -331,8 +331,27 @@ extension NotchPanelController: NSWindowDelegate {
             // Same "never mind" as the clipboard, and more urgent than any of
             // them: the camera light burns for as long as this surface is up.
             case .mirror: coordinator.closeMirror()
+            case .reels: closeReelsIfAnotherAppTookKey()
             case .peek, .none: break
             }
+        }
+    }
+
+    /// The reels have to close when the user goes back to work — the panel
+    /// swallows clicks across its whole 720×620 frame while a surface is up, and
+    /// with audio on, one that stays open is a talking dead zone over the top of
+    /// the screen.
+    ///
+    /// But it must *not* close when the web view's own children take key. A
+    /// `<select>` menu, an IME candidate window and an OAuth popup all resign the
+    /// panel, and closing on those would kill a login halfway through. Deferring
+    /// a turn and asking whether any window of ours still holds key separates the
+    /// two: `nil` means the key window belongs to another application.
+    private func closeReelsIfAnotherAppTookKey() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.coordinator.idleSurface == .reels else { return }
+            guard NSApp.keyWindow == nil else { return }
+            self.coordinator.closeReels()
         }
     }
 }
@@ -466,6 +485,12 @@ struct NotchPromptView: View {
     /// reopening doesn't pay for the camera warming up twice. Nothing about it
     /// is built for anyone who never opens it.
     @State private var mirror: MirrorSession?
+    /// Same bargain as `snake`, for higher stakes: the session holds a logged-in
+    /// Instagram, a scroll position and a buffered video, and rebuilding it on
+    /// every open would throw all three away. Nil until the surface is first
+    /// opened — a user who never turns the feature on never spawns a WebContent
+    /// process for it.
+    @State private var reels: ReelsSession?
     @State private var contentHeight: CGFloat = 0
     @State private var clearTask: Task<Void, Never>?
     @State private var expandTask: Task<Void, Never>?
@@ -509,6 +534,8 @@ struct NotchPromptView: View {
     /// options panel narrower than that would make clicking the indicator
     /// visibly shrink the surface. Expanding must expand.
     private static let voiceOptionsWidth: CGFloat = 380
+    /// Derived the same way, from the web view's own width.
+    private static let reelsWidth: CGFloat = ReelsSession.webWidth + 32
     /// Roughly the physical notch's own bottom corner radius.
     private static let notchBottomRadius: CGFloat = 10
     private static let openBottomRadius: CGFloat = 22
@@ -556,6 +583,7 @@ struct NotchPromptView: View {
         // exists to avoid.
         else if shownIdle == .voice { content = voice.isBusy ? Self.voiceOptionsWidth : Self.voiceWidth }
         else if shownIdle == .mirror { content = Self.mirrorWidth }
+        else if shownIdle == .reels { content = Self.reelsWidth }
         else { content = Self.peekWidth }
         return content + Self.flare * 2
     }
@@ -645,6 +673,15 @@ struct NotchPromptView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: coordinator.current?.id) { _, _ in sync() }
         .onChange(of: coordinator.idleSurface) { _, _ in sync() }
+        // Switching the feature off should actually reclaim the WebContent
+        // process, not leave it parked with a logged-in Instagram in it. The
+        // coordinator has already closed the surface by the time this arrives.
+        .onChange(of: coordinator.reelsEnabled) { _, enabled in
+            if !enabled {
+                reels?.setLive(false)
+                reels = nil
+            }
+        }
         .onAppear { sync() }
     }
 
@@ -798,6 +835,8 @@ struct NotchPromptView: View {
                 VoiceSurface(coordinator: coordinator, store: voice)
             } else if shownIdle == .mirror, let mirror {
                 MirrorSurface(coordinator: coordinator, session: mirror)
+            } else if shownIdle == .reels, let reels {
+                ReelsCard(coordinator: coordinator, session: reels)
             } else if shownIdle == .clipboard {
                 ClipboardCard(store: clipboard, coordinator: coordinator)
             } else if shownIdle == .peek {
@@ -860,6 +899,20 @@ struct NotchPromptView: View {
         clearTask?.cancel()
         expandTask?.cancel()
 
+        // One place decides whether the reels are live, and it runs before the
+        // content swap. `onDisappear` cannot do this job: it lands ~160ms late on
+        // a preemption, at the end of `setIdleContent`'s cross-fade, and ~800ms
+        // late on a collapse, at the end of `clearTask`. A detached web view is
+        // only detached — that is a second of Instagram still talking over a
+        // permission prompt. `sync()` runs on the same view update as the change
+        // itself, because `present()` mutates `current` and `idleSurface`
+        // together and both are observed at `onChange` below.
+        reels?.setLive(coordinator.isReelsLive)
+        // Same reasoning, same edge. The board's clock kept running through the
+        // collapse, so `esc` mid-run could steer the snake into a wall after it
+        // had left the screen and bank the worse score.
+        snake?.setRunning(coordinator.isGameLive)
+
         if let prompt = coordinator.current {
             shownPrompt = prompt
             setIdleContent(.none)
@@ -873,6 +926,9 @@ struct NotchPromptView: View {
             // Built here rather than with the panel: nothing about the board
             // costs anything to someone who never opens the game.
             if snake == nil { snake = SnakeGame() }
+            // Load-bearing on the first open only, when the call at the top of
+            // this function ran against a nil board. Idempotent after that.
+            snake?.setRunning(true)
             setIdleContent(.game)
             expandOnceMeasured()
         case .voice:
@@ -885,6 +941,19 @@ struct NotchPromptView: View {
             // costs nothing to someone who never opens the mirror.
             if mirror == nil { mirror = MirrorSession() }
             setIdleContent(.mirror)
+        case .reels:
+            shownPrompt = nil
+            // Same bargain as the board, at a higher price: a WebContent process
+            // is not something to spawn for someone who never turns this on.
+            if reels == nil {
+                let session = ReelsSession()
+                session.onEscape = { coordinator.closeReels() }
+                reels = session
+            }
+            // Load-bearing on the very first open only, when the call at the top
+            // of this function ran against a nil session. Idempotent after that.
+            reels?.setLive(true)
+            setIdleContent(.reels)
             expandOnceMeasured()
         case .clipboard:
             shownPrompt = nil
@@ -954,6 +1023,7 @@ struct PeekCard: View {
     @State private var gameHovered = false
     @State private var voiceHovered = false
     @State private var mirrorHovered = false
+    @State private var reelsHovered = false
 
     /// Left column is exactly the cover, so the transport underneath lines up
     /// with its edges.
@@ -989,6 +1059,9 @@ struct PeekCard: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.white.opacity(0.6))
             Spacer()
+            // The row runs quietest first. Reels is quieter than the game: it
+            // only exists once the user has switched it on.
+            if coordinator.reelsEnabled { reelsChip }
             gameChip
             mirrorChip
             voiceChip
@@ -1094,6 +1167,28 @@ struct PeekCard: View {
         .onHover { voiceHovered = $0 }
         .animation(.easeOut(duration: 0.14), value: voiceHovered)
         .accessibilityLabel("Open voice notes")
+    }
+
+    /// The way into the reels, and the only one — like the game, deliberately no
+    /// hotkey. Drawn at all only once the feature is switched on, which is the
+    /// second half of its opt-in: the switch in Settings, and then a doorway that
+    /// does not exist until you have thrown it.
+    private var reelsChip: some View {
+        Button { coordinator.openReels() } label: {
+            // The service's own mark rather than a glyph, for the reason
+            // `BrandMark` gives: a monochrome Instagram would be the wrong mark
+            // rather than a restyled one. It carries its own colour, so the
+            // hover cue is opacity on the whole mark instead of a tint.
+            BrandMark("Logos/logo.instagram", size: 11)
+                .opacity(reelsHovered ? 1 : 0.85)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(.white.opacity(reelsHovered ? 0.14 : 0.08), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { reelsHovered = $0 }
+        .animation(.easeOut(duration: 0.14), value: reelsHovered)
+        .accessibilityLabel("Open reels")
     }
 
     // MARK: Player column

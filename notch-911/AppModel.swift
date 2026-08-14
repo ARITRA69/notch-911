@@ -91,6 +91,24 @@ final class AppModel {
         }
     }
 
+    /// Instagram, in the notch. Off by default and reaching further outward than
+    /// anything else here — it signs into a third-party account and keeps that
+    /// session on this Mac — so it is opt-in twice over: this switch, and then a
+    /// chip in the peek that does not exist until the switch is on.
+    ///
+    /// Switching it off closes the surface and drops the session, which is what
+    /// reclaims the WebContent process. It does *not* clear the login; that is
+    /// the separate Sign out button, for the same reason clipboard capture
+    /// doesn't delete history on a toggle.
+    var reels: Bool {
+        didSet {
+            UserDefaults.standard.set(reels, forKey: ReelsSession.enabledDefaultsKey)
+            coordinator.reelsEnabled = reels
+            if !reels { coordinator.closeReels() }
+            append(reels ? "reels on" : "reels off")
+        }
+    }
+
     /// Codex isn't installed everywhere; don't offer to wire up something absent.
     let isCodexInstalled = CodexSettings.isCodexInstalled()
 
@@ -145,6 +163,8 @@ final class AppModel {
         surfaceStop = UserDefaults.standard.bool(forKey: "notchd.surfaceStop")
         youTubeMusic = UserDefaults.standard.bool(forKey: MediaController.youTubeMusicDefaultsKey)
         clipboardCapture = UserDefaults.standard.bool(forKey: ClipboardStore.captureDefaultsKey)
+        // Not registered: opt-in, so the unset-key false is exactly right.
+        reels = UserDefaults.standard.bool(forKey: ReelsSession.enabledDefaultsKey)
     }
 
     var port: UInt16? {
@@ -209,6 +229,9 @@ final class AppModel {
         }
         media.start()
         clipboard.setCapturing(clipboardCapture)
+        // `didSet` doesn't fire for the assignment in `init`, so the initial
+        // value has to be pushed by hand — same as `setCapturing` above.
+        coordinator.reelsEnabled = reels
         registerClipboardHotkey()
         registerVoiceHotkey()
         startCodexQuestionWatcher()
@@ -319,6 +342,16 @@ final class AppModel {
     func clearVoiceNotes() {
         voice.removeAll()
         append("cleared voice notes")
+    }
+
+    /// Ends the stored Instagram session. A feature that keeps someone logged in
+    /// on this Mac needs a visible way to log out, and there is nowhere else in
+    /// the app to do it.
+    func signOutOfReels() {
+        Task {
+            await ReelsSession.signOut()
+            append("signed out of reels")
+        }
     }
 
     // MARK: Hook handling

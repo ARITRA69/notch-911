@@ -14,7 +14,7 @@ import Observation
 /// Bool per surface: the peek and the clipboard are mutually exclusive by
 /// construction, and two Bools would spell four states — one of which is
 /// nonsense every guard in `evaluateHover` would then have to defend against.
-nonisolated enum IdleSurface: Sendable, Equatable {
+nonisolated enum IdleSurface: Sendable, Equatable, CaseIterable {
     /// Hover-dwell over the notch. Opens on its own, so it may never take the
     /// keyboard.
     case peek
@@ -32,7 +32,21 @@ nonisolated enum IdleSurface: Sendable, Equatable {
     /// no hotkey — it is somewhere you go, not something you summon over what
     /// you were doing.
     case mirror
+    /// Instagram, in a web view. Further down the "somewhere you go" axis than
+    /// the game, and the only surface here that reaches a third-party account —
+    /// so it is opt-in, and has no hotkey either.
+    case reels
     case none
+}
+
+extension IdleSurface {
+    /// Whether a prompt taking this surface away should hand it back once the
+    /// queue drains. Only the reels: the peek was never asked for (see
+    /// `advance()`), the clipboard is a picker you finish in seconds and can
+    /// re-summon with a keystroke, and the game pauses exactly where it stood.
+    /// The reels are the one surface the user is *inside* — a scroll position
+    /// and a playing video — that this app, rather than the user, interrupts.
+    var survivesPreemption: Bool { self == .reels }
 }
 
 nonisolated enum ExternalSubmissionState: Sendable, Equatable {
@@ -74,12 +88,29 @@ final class PromptCoordinator {
     /// window that eats clicks for a 22pt disc is a bug.
     var isInteractive: Bool { current != nil || idleSurface != .none }
 
+    /// True only while the reels are genuinely the thing on the notch. Media
+    /// suspension keys off this and nothing else — a detached `WKWebView` is
+    /// only detached, and keeps playing audio into a room where the surface it
+    /// came from is no longer on screen.
+    var isReelsLive: Bool { current == nil && idleSurface == .reels }
+
+    /// The same question for the board. Both exist because a surface being
+    /// *mounted* and a surface being *live* are different things here: the panel
+    /// keeps content on screen for 800ms after a collapse so it can shrink back
+    /// into the notch rather than vanish, and anything with a clock in it has to
+    /// stop at the start of that window rather than the end of it.
+    var isGameLive: Bool { current == nil && idleSurface == .game }
+
     /// Surfaces allowed to take the keyboard. A peek never may: it opens on
     /// hover alone, and swallowing the next keystroke meant for the user's
     /// editor is the one unforgivable thing a hover surface can do.
     var wantsKeyboard: Bool {
-        current != nil || idleSurface == .clipboard || idleSurface == .game
-            || idleSurface == .voice || idleSurface == .mirror
+        current != nil
+            || idleSurface == .clipboard
+            || idleSurface == .game
+            || idleSurface == .voice
+            || idleSurface == .mirror
+            || idleSurface == .reels
     }
 
     /// Fires as the peek opens and closes, so pollers can run only while the
@@ -90,6 +121,11 @@ final class PromptCoordinator {
     private(set) var stranded: [Prompt] = []
 
     var agentStatus = AgentStatus()
+
+    /// Whether the reels surface is switched on, pushed in by `AppModel` the
+    /// same way `agentStatus` is. The peek has to decide whether to draw the
+    /// chip, and the coordinator has no business reading `UserDefaults` itself.
+    var reelsEnabled = false
 
     /// Dwell before the peek opens.
     static let peekDelayMilliseconds = 300
@@ -110,6 +146,12 @@ final class PromptCoordinator {
     /// until the pointer genuinely touches the peek or the sensor once; from
     /// then on the normal hover-to-close rules apply.
     @ObservationIgnored private var peekAwaitsPointer = false
+
+    /// The surface a prompt displaced, held so `advance()` can hand it back.
+    /// Written in exactly one place — `setIdleSurface` — and cleared by any
+    /// surface change the *user* drives, so a restore is only ever the undo of
+    /// an interruption this app caused.
+    @ObservationIgnored private var preemptedSurface: IdleSurface = .none
 
     @ObservationIgnored private var waiting: [Prompt] = [] {
         didSet { stranded = waiting }
@@ -275,6 +317,11 @@ final class PromptCoordinator {
         waiting.append(prompt)
         waitingCount = waiting.count
         current = nil
+        // Cleared explicitly: this is the one exit that never calls
+        // `setIdleSurface`, so the single-writer rule can't do it for us. And
+        // `esc` means "get out of my way" — honouring that literally beats
+        // second-guessing it by reopening the feed the prompt interrupted.
+        preemptedSurface = .none
         onVisibilityChange?(false)
     }
 
@@ -318,9 +365,23 @@ final class PromptCoordinator {
     ///    so a peek→clipboard swap that skipped it would leave the panel unable
     ///    to take a keystroke. `refreshPanelVisibility` recomputes from scratch
     ///    and ignores the Bool, so re-entering it is free.
+    /// 4. `preemptedSurface` is maintained here rather than in `present()`, so
+    ///    there is exactly one writer. A prompt being up means the notch was
+    ///    taken; anything else means the user is driving, and any surface they
+    ///    choose — or any close they ask for — retires the memo. A restore they
+    ///    didn't earn reads as the notch reopening by itself.
     private func setIdleSurface(_ surface: IdleSurface) {
-        let wasPeeking = idleSurface == .peek
+        let previous = idleSurface
+        let wasPeeking = previous == .peek
         idleSurface = surface
+        if current != nil {
+            // Only the *first* prompt in a queue leaves a memo. The second
+            // arrives to an already-empty surface and must not overwrite what
+            // the first displaced.
+            if previous.survivesPreemption { preemptedSurface = previous }
+        } else {
+            preemptedSurface = .none
+        }
         if surface != .peek {
             pointerOnPanel = false
             // The pointer hold is a property of one navigated-to peek; any
@@ -351,12 +412,7 @@ final class PromptCoordinator {
         setIdleSurface(.clipboard)
     }
 
-    /// The ← in the clipboard heading — hand the surface back to the peek
-    /// rather than collapsing. The pointer latch is deliberately left alone:
-    /// no enter event was delivered while the clipboard owned the surface, so
-    /// a latch set here would have no guaranteed exit to clear it. Instead the
-    /// peek is marked as awaiting the pointer, which suspends hover-to-close
-    /// until the user actually reaches it — see `peekAwaitsPointer`.
+    /// The chip in the peek. No hotkey, deliberately — see the enum.
     func openGame() {
         guard current == nil, idleSurface != .game else { return }
         dwell?.cancel()
@@ -426,9 +482,38 @@ final class PromptCoordinator {
         setIdleSurface(.none)
     }
 
+    /// The chip in the peek, which only exists once the feature is switched on.
+    /// Gated on `reelsEnabled` as well as drawn from it, so a chip left over
+    /// from a stale render can't open a surface the user has since disabled.
+    func openReels() {
+        guard current == nil, reelsEnabled, idleSurface != .reels else { return }
+        dwell?.cancel()
+        setIdleSurface(.reels)
+    }
+
+    /// `esc`, another app taking key, and the settings switch going off. The
+    /// session object outlives the surface, so this is a pause: reopening lands
+    /// on the same scroll position with the same login.
+    func closeReels() {
+        guard idleSurface == .reels else { return }
+        dwell?.cancel()
+        setIdleSurface(.none)
+    }
+
+    /// The ← in the clipboard heading — hand the surface back to the peek
+    /// rather than collapsing. The pointer latch is deliberately left alone:
+    /// no enter event was delivered while the clipboard owned the surface, so
+    /// a latch set here would have no guaranteed exit to clear it. Instead the
+    /// peek is marked as awaiting the pointer, which suspends hover-to-close
+    /// until the user actually reaches it — see `peekAwaitsPointer`.
     func backToPeek() {
-        guard idleSurface == .clipboard || idleSurface == .game
-                || idleSurface == .voice || idleSurface == .mirror else { return }
+        guard idleSurface == .clipboard
+                || idleSurface == .game
+                || idleSurface == .voice
+                || idleSurface == .mirror
+                || idleSurface == .reels else {
+            return
+        }
         dwell?.cancel()
         peekAwaitsPointer = true
         setIdleSurface(.peek)
@@ -540,6 +625,7 @@ final class PromptCoordinator {
         waiting.removeAll()
         waitingCount = 0
         current = nil
+        preemptedSurface = .none
         dwell?.cancel()
         setIdleSurface(.none)
     }
@@ -561,8 +647,15 @@ final class PromptCoordinator {
             // Answering always collapses, even if the pointer is still over the
             // notch — re-opening into a peek the user didn't ask for reads as a
             // glitch rather than a feature. Another dwell brings it back.
+            //
+            // The exception is a surface a prompt took away. The user asked for
+            // that one and this app, not they, closed it; handing it back is
+            // finishing the interruption rather than starting something.
+            // `current` is cleared first so `setIdleSurface` sees the user, not
+            // a prompt, and retires the memo on its own.
+            let restored: IdleSurface = reelsEnabled ? preemptedSurface : .none
             dwell?.cancel()
-            setIdleSurface(.none)
+            setIdleSurface(restored)
         } else {
             let next = waiting.removeFirst()
             waitingCount = waiting.count

@@ -104,6 +104,10 @@ struct StatusView: View {
                 clipboardStorageRow
                 Divider().padding(.leading, 14)
                 voiceRow
+                Divider().padding(.leading, 14)
+                reelsRow
+                Divider().padding(.leading, 14)
+                reelsStorageRow
             }
         }
     }
@@ -330,6 +334,30 @@ struct StatusView: View {
     /// This also gives the hotkey somewhere to report from — a chord another app
     /// already owns registers successfully and then never fires, so "it's on" is
     /// worth stating rather than assuming.
+    private var reelsRow: some View {
+        toggleRow(
+            isOn: $model.reels,
+            title: "Reels in the notch",
+            detail: "Scroll Instagram while an agent works; a prompt takes the notch back the "
+                + "moment one arrives. Signs into Instagram in a web view and keeps that "
+                + "session on this Mac. Passwords go straight to the page — paste with ⌘V, "
+                + "since a web view has no password-manager autofill."
+        )
+    }
+
+    private var reelsStorageRow: some View {
+        row(
+            color: .pink,
+            title: "Instagram session",
+            detail: "Stored on this Mac until you sign out. Turning the switch off hides the "
+                + "surface but keeps you logged in."
+        ) {
+            Button("Sign out") { model.signOutOfReels() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+    }
+
     private var clipboardStorageRow: some View {
         row(
             color: clipboardColor,

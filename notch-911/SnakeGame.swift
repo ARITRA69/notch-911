@@ -99,6 +99,22 @@ final class SnakeGame {
 
     // MARK: Lifecycle
 
+    /// Whether the loop is stepping. Exposed so the panel can drive it from one
+    /// place and a test can assert it stopped.
+    var isRunning: Bool { loop != nil }
+
+    /// The single funnel for "is the board actually on screen", driven from
+    /// `NotchPromptView.sync()` on the leading edge of every change.
+    ///
+    /// The leading edge is the whole point. `onDisappear` cannot do this job:
+    /// closing the notch schedules an 800ms `clearTask` before the view is
+    /// unmounted, so the loop kept stepping 5–11 more times off screen — long
+    /// enough for `esc` to walk the snake into a wall and write a worse high
+    /// score than the player actually earned.
+    func setRunning(_ running: Bool) {
+        if running { start() } else { stop() }
+    }
+
     /// Idempotent, because the view's `onAppear` can fire more than once for a
     /// surface that is shown, hidden and shown again.
     func start() {
@@ -114,6 +130,10 @@ final class SnakeGame {
         }
     }
 
+    /// Synchronous in the way that matters: `loop` is cleared before this
+    /// returns, so nothing can observe a stopped game that still says it is
+    /// running. The cancelled task may still be unwinding, but it re-checks
+    /// `Task.isCancelled` after its sleep and so cannot land another `step()`.
     func stop() {
         loop?.cancel()
         loop = nil
