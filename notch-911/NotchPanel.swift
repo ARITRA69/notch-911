@@ -360,7 +360,13 @@ extension NotchPanelController: NSWindowDelegate {
 /// "first mouse" — which AppKit swallows by default as the click that would
 /// have activated the window. Without this the recording indicator would need
 /// two clicks to open, the first of them silently doing nothing.
-private final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+///
+/// Concrete rather than generic over its content, and that is load-bearing: as
+/// `NSHostingView<Content>` this crashed the Swift optimiser outright — a
+/// segfault in EarlyPerfInliner on the class's own deinit — so Release could not
+/// be compiled at all while Debug built fine. There is one instantiation, so the
+/// type parameter bought nothing.
+private final class FirstMouseHostingView: NSHostingView<HoverSensorView> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
