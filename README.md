@@ -274,6 +274,42 @@ is a property you can check by reading `MirrorView.swift`, not a promise. `esc`,
 the back chevron and clicking into another app all stop the session, because the
 camera light stays lit for exactly as long as it runs.
 
+### Reels
+
+Instagram, in the notch, for the twenty minutes an agent spends working. It hangs
+as a **9:16** frame — the shape a reel already is — so the video fills it edge to
+edge instead of sitting letterboxed inside a landscape box.
+
+It is **off by default**, and the chip that opens it does not exist until you
+turn it on in the status window. That is the whole of the opt-in: a switch, and
+then a doorway that isn't there until you have thrown it.
+
+Signing in happens in the web view, by hand. There is no API behind this and
+there cannot be — Meta retired Basic Display in December 2024, and every scope
+left returns only your own posted media, never the feed served *to* you. A small
+browser with a phone's user agent is the only thing that can scroll reels at all.
+The session lives on this Mac until you press **Sign out** in the status window;
+turning the switch off hides the surface and leaves you logged in. Passwords go
+straight to the page, so paste with **⌘V** — a web view has no password-manager
+autofill to reach for.
+
+It is the one surface you are *inside*, and so the only one that survives being
+preempted. A prompt takes the notch back the moment it arrives; answer it, and
+the scroll position and the login are still where you left them. `esc` closes the
+surface without tearing the session down, for the same reason.
+
+Audio stops when the surface does. A detached `WKWebView` is only detached — it
+will happily go on playing into a room where the thing it came from is no longer
+on screen — so playback is suspended on the same edge that takes the surface off
+the notch, rather than being trusted to go quiet on its own.
+
+`ReelsSession` signs into a third-party account, so it is written as a list of
+things it must **not** do: no injected scripts, no message handlers, no
+`evaluateJavaScript` anywhere, no auth-challenge delegate, no cookie reads, no
+page capture, and nothing that reads a URL beyond its host or a key event beyond
+its keycode. Each of those is one `grep` — the posture is checkable without
+reading the logic.
+
 ---
 
 ## The status window
@@ -427,6 +463,8 @@ notch-911/
   VoiceNoteStore.swift             Recording, on-device transcription, persistence
   VoiceNoteView.swift              The voice surface
   MirrorView.swift                 The camera, as a 9:16 mirror
+  ReelsSurface.swift               Instagram in a web view, and its session
+  ReelsCard.swift                  The reels surface
   notch-911.entitlements           Microphone and camera, for the hardened runtime
   GlobalHotkey.swift               ⇧⌘V and ⇧⌘M registration
   BrandMark.swift                  Service marks from the asset catalog
@@ -436,8 +474,8 @@ notch-911/
   CodexAccessibilityBridge.swift   Accessibility submission
   CodeSignatureInspector.swift     Signing diagnostics
   UpdateChecker.swift              Daily GitHub Releases check + menu item
-notch-911Tests/                    Nine suites
-scripts/                           Signing identity, installer, release DMG, icon generator
+notch-911Tests/                    Eleven suites
+scripts/                           Signing identity, installer, release DMG, icon and backdrop generators
 docs/images/                       README assets
 ```
 
