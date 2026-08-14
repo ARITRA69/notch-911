@@ -196,6 +196,58 @@ moves — but it does mean the app is no longer doing literally nothing when idl
 > chip is always there as a way in that can't silently break.
 
 
+### Voice notes
+
+<div align="center">
+  <img src="docs/images/notch-audio-note.png" width="520" alt="Mic to add audio note using command+shift+m">
+</div>
+
+A thought you want out of your head without leaving what you're doing. Press
+**⇧⌘M** from anywhere and talk; press it again to stop. What you said lands in
+the notch as text, in a list that behaves like the clipboard's — hover or arrow
+onto a note, then **Copy** or **Delete**.
+
+Recording deliberately **does not open a window**. ⇧⌘M is a key you press
+mid-sentence, and a panel thrown across your work is the last thing that moment
+needs. Instead the notch grows a wing carrying a red mic and a narrow level
+meter — enough to know it's listening and how loudly, and nothing else. The
+hover peek is suppressed for as long as it's up, so the one control you have
+over a live recording can't be covered by a surface you didn't ask for.
+
+**Click the notch** to open that control: **Discard**, **Pause** and **Save**.
+Pause holds the mic open and resumes into the *same* recording rather than
+starting a second one — a note split across two files isn't a note — and the
+elapsed time excludes whatever the pause cost. Clicking the notch again puts the
+recording back to just the indicator, still running.
+
+Transcription runs **on this Mac only**, and there is deliberately no setting to
+change that. Routing spoken notes through a server the moment your locale lacks
+an on-device model would quietly break the same promise the clipboard makes. So
+when on-device recognition isn't available — wrong locale, no model downloaded,
+`Speech.framework` says no — the note keeps **the recording itself** instead. It
+plays back from the row, and its Copy button hands you the audio file, so a note
+is never lost to a transcription that couldn't happen.
+
+Notes are capped at sixty and each recording at five minutes. `esc` stops a
+recording and keeps it; **space** is the one key that throws it away.
+
+| Key | While recording | In the list |
+| --- | --- | --- |
+| `⇧⌘M` | Save and keep | Start a new note |
+| `↵` | — | Copy the selected note |
+| `⌫` | — | Delete the selected note |
+| `↑` `↓` | — | Move the selection |
+| `esc` | Save and keep | Close the surface |
+| `space` | Discard the recording | — |
+| *click the notch* | Discard · Pause · Save | — |
+
+> Under the hardened runtime the microphone is gated by **entitlement**, not by
+> TCC alone, so `notch-911.entitlements` carries
+> `com.apple.security.device.audio-input` and both signing scripts pass it to
+> `codesign`. Without it the unsigned Xcode build records fine and the installed
+> copy records silence — which is the most confusing possible way for this to
+> break.
+
 ### Snake Game
 
 <div align="center">
@@ -203,6 +255,24 @@ moves — but it does mean the app is no longer doing literally nothing when idl
 </div>
 
 A mini snake game to keep you busy while working 
+
+### Mirror
+
+The camera, shown back to you, in the one place on the machine that already sits
+directly underneath it. Open it from the **person** chip in the peek; it hangs
+from the notch as a **9:16 portrait** frame, which is the shape a face is.
+
+It is mirrored on purpose. An unmirrored camera is a video call; a mirrored one
+is a mirror, and reaching for the wrong side of your collar is how you find out
+which one you're looking at. The built-in camera hands over a 16:9 landscape
+frame, so the preview fills the tall frame and lets the sides fall outside it —
+cropping the room away rather than shrinking your face into a letterbox.
+
+Nothing is captured. The session has one video input and one preview layer and
+**no output of any kind** — no shutter, no file, no buffer you could write. That
+is a property you can check by reading `MirrorView.swift`, not a promise. `esc`,
+the back chevron and clicking into another app all stop the session, because the
+camera light stays lit for exactly as long as it runs.
 
 ---
 
@@ -304,6 +374,14 @@ signing identity, so ad-hoc rebuilds would silently drop the grant every time.
 | **Accessibility** | Operate controls in the Codex window to submit answers | Direct Codex answers |
 | **Automation** (Apple Events) | Read and control Music.app / Spotify | First now-playing use |
 | **Automation** (browser) | Read YouTube Music via `navigator.mediaSession` | Off by default |
+| **Microphone** | Record a voice note | First ⇧⌘M |
+| **Speech Recognition** | Transcribe that note on-device | First ⇧⌘M |
+| **Camera** | Show the mirror | First time the mirror is opened |
+
+Both voice permissions are asked for on the first ⇧⌘M, and only the microphone
+is load-bearing: deny Speech Recognition and notes still record, they just stay
+recordings instead of becoming text. Deny the microphone and the surface says so
+with a button through to the right Settings pane, rather than failing silently.
 
 Clipboard history needs **no permission at all**. That is why ⇧⌘V is a Carbon
 hot key rather than an `NSEvent` global monitor — the latter is gated on
@@ -346,7 +424,11 @@ notch-911/
   FileShelf.swift                  Drag-in / drag-out shelf
   ClipboardHistory.swift           Pasteboard capture, dedupe, persistence
   ClipboardCard.swift              The clipboard surface
-  GlobalHotkey.swift               ⇧⌘V registration
+  VoiceNoteStore.swift             Recording, on-device transcription, persistence
+  VoiceNoteView.swift              The voice surface
+  MirrorView.swift                 The camera, as a 9:16 mirror
+  notch-911.entitlements           Microphone and camera, for the hardened runtime
+  GlobalHotkey.swift               ⇧⌘V and ⇧⌘M registration
   BrandMark.swift                  Service marks from the asset catalog
   ClaudeSettings.swift             ~/.claude/settings.json merge
   CodexSettings.swift              Codex shim registration
@@ -354,7 +436,7 @@ notch-911/
   CodexAccessibilityBridge.swift   Accessibility submission
   CodeSignatureInspector.swift     Signing diagnostics
   UpdateChecker.swift              Daily GitHub Releases check + menu item
-notch-911Tests/                    Five suites
+notch-911Tests/                    Nine suites
 scripts/                           Signing identity, installer, release DMG, icon generator
 docs/images/                       README assets
 ```

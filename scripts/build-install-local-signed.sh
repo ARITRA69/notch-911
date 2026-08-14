@@ -51,11 +51,18 @@ if [[ ! -d "${source_app}" ]]; then
 fi
 
 print "Signing with ${identity_name}…"
+# The build above ran with CODE_SIGNING_ALLOWED=NO, so whatever Xcode would
+# have applied from CODE_SIGN_ENTITLEMENTS never made it into the binary — this
+# signature is the only one the installed app ever gets. Passing the file
+# explicitly is what keeps the microphone reachable under `--options runtime`;
+# without it ⇧⌘M records silence in /Applications and works fine from Xcode,
+# which is the most confusing possible way for this to break.
 /usr/bin/codesign \
     --force \
     --deep \
     --keychain "${HOME}/Library/Keychains/login.keychain-db" \
     --options runtime \
+    --entitlements "${repository_directory}/notch-911/notch-911.entitlements" \
     --timestamp=none \
     --sign "${identity_name}" \
     "${source_app}"

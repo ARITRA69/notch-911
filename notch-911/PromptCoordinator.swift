@@ -24,6 +24,14 @@ nonisolated enum IdleSurface: Sendable, Equatable {
     /// The Snake board. Deliberately has no hotkey: the clipboard is something
     /// you summon over whatever you were doing, a game is somewhere you go.
     case game
+    /// The voice recorder and its saved notes. Unlike the game, this *does*
+    /// have a hotkey — ⇧⌘M both opens the surface and starts the recording in
+    /// one press, the same way ⇧⌘V both opens and shows.
+    case voice
+    /// The camera, as a mirror. Like the game and unlike the clipboard it has
+    /// no hotkey — it is somewhere you go, not something you summon over what
+    /// you were doing.
+    case mirror
     case none
 }
 
@@ -71,6 +79,7 @@ final class PromptCoordinator {
     /// editor is the one unforgivable thing a hover surface can do.
     var wantsKeyboard: Bool {
         current != nil || idleSurface == .clipboard || idleSurface == .game
+            || idleSurface == .voice || idleSurface == .mirror
     }
 
     /// Fires as the peek opens and closes, so pollers can run only while the
@@ -362,8 +371,64 @@ final class PromptCoordinator {
         setIdleSurface(.none)
     }
 
+    /// The hotkey handler calls this every time it fires while nothing is
+    /// recording yet — including when the voice surface is already open and
+    /// showing the note list, which is exactly when "start a new note" should
+    /// still work.
+    func openVoice() {
+        guard current == nil, idleSurface != .voice else { return }
+        dwell?.cancel()
+        setIdleSurface(.voice)
+    }
+
+    /// Mirrors `VoiceNoteStore.isCapturing`, pushed down by the app model on the
+    /// same edge that brings the panel on screen. The coordinator can't read the
+    /// store directly — nothing else in it reaches sideways into a store — and
+    /// two things here need the answer: the hover peek must not open over a
+    /// recording indicator, and a click on the notch has to mean something while
+    /// one is showing.
+    @ObservationIgnored var voiceIsCapturing = false
+
+    /// A click on the notch itself, delivered by the hover sensor. Only means
+    /// anything mid-note: the collapsed indicator *is* the control, and this is
+    /// the way to Discard / Pause / Save. Toggles, so clicking it again puts the
+    /// note back to just the indicator rather than stranding the panel open.
+    func tappedSensor() {
+        guard voiceIsCapturing, current == nil else { return }
+        dwell?.cancel()
+        setIdleSurface(idleSurface == .voice ? .none : .voice)
+    }
+
+    /// `esc` while idle, and the panel losing key. A live recording is stopped
+    /// by `VoiceSurface`'s own `esc` handler *before* this ever runs — see its
+    /// `shortcuts` — so by the time the surface actually closes there is
+    /// nothing left capturing to interrupt.
+    func closeVoice() {
+        guard idleSurface == .voice else { return }
+        dwell?.cancel()
+        setIdleSurface(.none)
+    }
+
+    /// The chip in the peek. No hotkey to toggle against, so this only opens.
+    func openMirror() {
+        guard current == nil, idleSurface != .mirror else { return }
+        dwell?.cancel()
+        setIdleSurface(.mirror)
+    }
+
+    /// `esc`, and the panel losing key. Collapses outright rather than falling
+    /// back to the peek, for the reason the clipboard gives — and with one of
+    /// its own: the camera light stays lit for as long as the surface is
+    /// mounted, so "close" has to mean closed.
+    func closeMirror() {
+        guard idleSurface == .mirror else { return }
+        dwell?.cancel()
+        setIdleSurface(.none)
+    }
+
     func backToPeek() {
-        guard idleSurface == .clipboard || idleSurface == .game else { return }
+        guard idleSurface == .clipboard || idleSurface == .game
+                || idleSurface == .voice || idleSurface == .mirror else { return }
         dwell?.cancel()
         peekAwaitsPointer = true
         setIdleSurface(.peek)
@@ -422,8 +487,11 @@ final class PromptCoordinator {
 
         if inside {
             // A real blocked prompt outranks the idle surface, and so does a
-            // clipboard the user deliberately opened.
-            guard current == nil, idleSurface == .none else { return }
+            // clipboard the user deliberately opened. So does a note being
+            // recorded: the notch is showing its indicator, and replacing that
+            // with the peek — on hover, without being asked — would hide the
+            // one control the user has over the recording.
+            guard current == nil, idleSurface == .none, !voiceIsCapturing else { return }
             // Short enough to feel immediate, long enough that crossing the
             // notch on the way somewhere else doesn't trigger it. The sensor is
             // only the notch itself, and nothing else lives there, so this can

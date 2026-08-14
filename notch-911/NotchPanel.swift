@@ -72,16 +72,17 @@ enum NotchGeometry {
     /// deliberately shallow band at the top centre, to overlap as little of the
     /// menu bar as possible.
     ///
-    /// With the mini player showing, the collapsed surface is wider (a wing per
-    /// side for the disc) and a point taller — the sensor has to cover all of
-    /// it, or hovering the cover art does nothing.
-    static func sensorFrame(forMiniPlayer miniPlayer: Bool = false) -> CGRect? {
+    /// With a wing showing — the mini player's disc, or the recording indicator
+    /// — the collapsed surface is wider (a wing per side) and a point taller, and
+    /// the sensor has to cover all of it or the pointer never reaches it. Pass
+    /// the wing width in play; `0` is the bare notch.
+    static func sensorFrame(wing: CGFloat = 0) -> CGRect? {
         guard let screen = screen() else { return nil }
         let frame = screen.frame
         var width = hasNotch ? notchWidth(on: screen) : 200
         var height = hasNotch ? inset : 8
-        if miniPlayer {
-            width += NotchPromptView.miniWing * 2
+        if wing > 0 {
+            width += wing * 2
             height += NotchPromptView.miniExtraHeight
         }
         return CGRect(
@@ -107,15 +108,18 @@ final class NotchPanelController: NSObject {
     private let keySink: NotchPanel
     private let coordinator: PromptCoordinator
     private let media: MediaMonitor
+    private let voice: VoiceNoteStore
 
     init(
         coordinator: PromptCoordinator,
         media: MediaMonitor,
         shelf: ShelfStore,
-        clipboard: ClipboardStore
+        clipboard: ClipboardStore,
+        voice: VoiceNoteStore
     ) {
         self.coordinator = coordinator
         self.media = media
+        self.voice = voice
 
         sensor = HoverSensorPanel(
             contentRect: NotchGeometry.sensorFrame() ?? .zero,
@@ -131,11 +135,12 @@ final class NotchPanelController: NSObject {
         sensor.isMovable = false
         sensor.hidesOnDeactivate = false
         sensor.isReleasedWhenClosed = false
-        sensor.contentView = NSHostingView(
+        sensor.contentView = FirstMouseHostingView(
             rootView: HoverSensorView(
                 shelf: shelf,
                 onHover: { coordinator.hoverChanged($0) },
-                onDragTargeting: { coordinator.dragOverSensor($0) }
+                onDragTargeting: { coordinator.dragOverSensor($0) },
+                onTap: { coordinator.tappedSensor() }
             )
         )
 
@@ -164,7 +169,8 @@ final class NotchPanelController: NSObject {
                 coordinator: coordinator,
                 media: media,
                 shelf: shelf,
-                clipboard: clipboard
+                clipboard: clipboard,
+                voice: voice
             )
         )
         hosting.frame = CGRect(origin: .zero, size: Self.panelSize)
@@ -285,9 +291,18 @@ final class NotchPanelController: NSObject {
     }
 
     private func repositionSensor() {
-        if let sensorFrame = NotchGeometry.sensorFrame(forMiniPlayer: media.nowPlaying != nil) {
+        if let sensorFrame = NotchGeometry.sensorFrame(wing: currentWing) {
             sensor.setFrame(sensorFrame, display: false)
         }
+    }
+
+    /// Whichever wing the collapsed surface is currently wearing. Recording wins
+    /// over the mini player because it is the wider of the two — the disc still
+    /// fits inside it, and a sensor sized to the disc would leave most of the
+    /// recording indicator unclickable.
+    private var currentWing: CGFloat {
+        if voice.isBusy { return NotchPromptView.recordingWing }
+        return media.nowPlaying != nil ? NotchPromptView.miniWing : 0
     }
 }
 
@@ -306,10 +321,28 @@ extension NotchPanelController: NSWindowDelegate {
             // Same reasoning, and no loss: the game object outlives the
             // surface, so reopening resumes the stage mid-roll.
             case .game: coordinator.closeGame()
+            // Stop rather than cancel: clicking away mid-note is the same
+            // "went somewhere else to think about it" as the clipboard case,
+            // and a recording that stops still keeps what it heard. The
+            // surface itself is left open, showing the note that was just
+            // saved — closeVoice() only fires if nothing was recording.
+            case .voice:
+                if voice.isCapturing { voice.stop() } else { coordinator.closeVoice() }
+            // Same "never mind" as the clipboard, and more urgent than any of
+            // them: the camera light burns for as long as this surface is up.
+            case .mirror: coordinator.closeMirror()
             case .peek, .none: break
             }
         }
     }
+}
+
+/// The sensor panel is deliberately never key, so every click in it is a
+/// "first mouse" — which AppKit swallows by default as the click that would
+/// have activated the window. Without this the recording indicator would need
+/// two clicks to open, the first of them silently doing nothing.
+private final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 /// Transparent, but hit-testable — `Color.clear` alone receives no hover events.
@@ -317,11 +350,15 @@ private struct HoverSensorView: View {
     let shelf: ShelfStore
     let onHover: (Bool) -> Void
     let onDragTargeting: (Bool) -> Void
+    /// A click on the notch. Inert unless a note is being recorded — see
+    /// `PromptCoordinator.tappedSensor`.
+    let onTap: () -> Void
 
     var body: some View {
         Color.white.opacity(0.001)
             .contentShape(Rectangle())
             .onHover(perform: onHover)
+            .onTapGesture(perform: onTap)
             // Dropping straight onto the notch shelves the file, so you never
             // have to wait for the panel before letting go.
             .dropDestination(for: URL.self) { urls, _ in
@@ -410,6 +447,7 @@ struct NotchPromptView: View {
     let media: MediaMonitor
     let shelf: ShelfStore
     let clipboard: ClipboardStore
+    let voice: VoiceNoteStore
 
     /// What the surface is rendering. Held in view state rather than read
     /// straight from the coordinator so the content outlives the collapse:
@@ -424,6 +462,10 @@ struct NotchPromptView: View {
     /// closing the notch mid-run is a pause rather than a loss. Nothing about
     /// it is built for anyone who never opens it.
     @State private var snake: SnakeGame?
+    /// Created the first time the mirror is opened, and kept afterwards so
+    /// reopening doesn't pay for the camera warming up twice. Nothing about it
+    /// is built for anyone who never opens it.
+    @State private var mirror: MirrorSession?
     @State private var contentHeight: CGFloat = 0
     @State private var clearTask: Task<Void, Never>?
     @State private var expandTask: Task<Void, Never>?
@@ -442,11 +484,31 @@ struct NotchPromptView: View {
     /// flares is 664, which the fixed 720pt panel still clears (§6.2 — the
     /// window is never resized, so this is a hard ceiling, not a suggestion).
     private static let clipboardWidth: CGFloat = 640
+    /// Exactly the 9:16 preview, plus the card's own horizontal padding —
+    /// derived from `MirrorSurface` rather than typed out here, since the
+    /// aspect ratio is the whole point and a width chosen independently would
+    /// quietly stop matching it.
+    private static let mirrorWidth: CGFloat = MirrorSurface.previewWidth + 32
     /// Whatever the board needs, plus the card's own horizontal padding.
     /// Derived rather than typed out: the grid cannot be squeezed to fit a
     /// number chosen here without cells landing on fractional points.
     private static let gameWidth: CGFloat =
         SnakeGameView.displaySize.width + 32
+    /// Wide enough for two lines of transcript beside the level meter without
+    /// either wrapping oddly. Like every other surface width here this is the
+    /// *outer* box — `content` then spends 16 + `flare` a side on padding, and
+    /// `VoiceSurface` fills whatever is left rather than naming a width of its
+    /// own. It named 420 once, and rendered 32pt off the right edge.
+    private static let voiceWidth: CGFloat = 420
+    /// Mid-note: wide enough for Discard · Pause · Save and the row above them,
+    /// and no wider. Clicking the indicator is meant to feel like the notch
+    /// offering three answers, not like opening the notes app.
+    ///
+    /// It still has to clear the *collapsed* recording width, though — the notch
+    /// plus two `recordingWing`s runs to roughly 340pt on a 13" Air, and an
+    /// options panel narrower than that would make clicking the indicator
+    /// visibly shrink the surface. Expanding must expand.
+    private static let voiceOptionsWidth: CGFloat = 380
     /// Roughly the physical notch's own bottom corner radius.
     private static let notchBottomRadius: CGFloat = 10
     private static let openBottomRadius: CGFloat = 22
@@ -460,6 +522,24 @@ struct NotchPromptView: View {
     /// has to pay for the flare *on top of* the disc and its padding, or the
     /// disc sits on the curve and hangs off the edge of the surface.
     static let miniWing: CGFloat = flare + discSize + discPadding * 2
+
+    // MARK: Recording indicator
+
+    /// The mic glyph, then the meter. Small on purpose: this lives on the menu
+    /// bar for as long as the note does, and a wide meter there stops reading as
+    /// a status light and starts reading as a window.
+    private static let recordingGlyph: CGFloat = 12
+    private static let recordingGap: CGFloat = 5
+    private static let recordingMeterWidth: CGFloat = 40
+    private static let recordingMeterHeight: CGFloat = 11
+    private static var recordingContentWidth: CGFloat {
+        recordingGlyph + recordingGap + recordingMeterWidth
+    }
+    /// Same construction as `miniWing`, sized for the indicator instead of the
+    /// disc. Not private — the sensor has to match the surface it covers.
+    static var recordingWing: CGFloat {
+        flare + recordingContentWidth + discPadding * 2
+    }
     /// The collapsed surface sits this much proud of the physical notch while
     /// the mini player is showing, so the black slab reads as its own shape
     /// rather than vanishing exactly into the bezel.
@@ -471,6 +551,11 @@ struct NotchPromptView: View {
         if shownPrompt != nil { content = Self.promptWidth }
         else if shownIdle == .clipboard { content = Self.clipboardWidth }
         else if shownIdle == .game { content = Self.gameWidth }
+        // Mid-note the surface is only ever three buttons, and opening the full
+        // list width to hold them is the "taking the whole space" this design
+        // exists to avoid.
+        else if shownIdle == .voice { content = voice.isBusy ? Self.voiceOptionsWidth : Self.voiceWidth }
+        else if shownIdle == .mirror { content = Self.mirrorWidth }
         else { content = Self.peekWidth }
         return content + Self.flare * 2
     }
@@ -485,8 +570,20 @@ struct NotchPromptView: View {
     /// The copy acknowledgement, in the right wing. Mirrors the mini player.
     private var hasCopiedBadge: Bool { clipboard.justCaptured }
 
+    /// The recording indicator, in the right wing. Shown for the whole of
+    /// `isBusy` rather than just while capturing, so the notch doesn't snap back
+    /// to bare for the second or two transcription takes.
+    private var hasRecordingIndicator: Bool { voice.isBusy }
+
     /// Either wing's occupant is enough to open both — see `collapsedWidth`.
-    private var hasWings: Bool { hasMiniPlayer || hasCopiedBadge }
+    private var hasWings: Bool { hasMiniPlayer || hasCopiedBadge || hasRecordingIndicator }
+
+    /// How wide each wing is. The recording indicator needs more room than the
+    /// disc, and takes it for both sides rather than only its own — see
+    /// `collapsedWidth` on why the wings stay symmetric.
+    private var wingWidth: CGFloat {
+        hasRecordingIndicator ? Self.recordingWing : Self.miniWing
+    }
 
     /// Collapsed, the surface grows a wing on each side to make room for the
     /// disc. Symmetric on purpose — growing only leftward would slide the
@@ -494,7 +591,7 @@ struct NotchPromptView: View {
     /// rather than as the notch widening. That is why a copy badge, which only
     /// ever occupies the right wing, still opens both.
     private var collapsedWidth: CGFloat {
-        bareNotchWidth + (hasWings ? Self.miniWing * 2 : 0)
+        bareNotchWidth + (hasWings ? wingWidth * 2 : 0)
     }
 
     private var collapsedHeight: CGFloat {
@@ -533,7 +630,7 @@ struct NotchPromptView: View {
     /// it fades out instead of parking a black bar on the menu bar — except
     /// while the copy badge is up, which needs something to sit on.
     private var surfaceOpacity: Double {
-        isExpanded || NotchGeometry.hasNotch || hasCopiedBadge ? 1 : 0
+        isExpanded || NotchGeometry.hasNotch || hasCopiedBadge || hasRecordingIndicator ? 1 : 0
     }
 
     var body: some View {
@@ -541,6 +638,7 @@ struct NotchPromptView: View {
             shadowLayer
             surface
             miniPlayer
+            recordingIndicator
             copiedBadge
             content
         }
@@ -605,12 +703,45 @@ struct NotchPromptView: View {
         // notch's left edge and where the shape's body actually ends, which is
         // `flare` short of the rect.
         .offset(
-            x: -(bareNotchWidth / 2 + (Self.miniWing - Self.flare) / 2),
+            x: -(bareNotchWidth / 2 + (wingWidth - Self.flare) / 2),
             y: (collapsedHeight - Self.discSize) / 2
         )
         .opacity(visible ? 1 : 0)
         .scaleEffect(visible ? 1 : 0.6)
         .animation(.spring(response: 0.36, dampingFraction: 0.8), value: hasMiniPlayer)
+        .animation(contentFade, value: isExpanded)
+        .allowsHitTesting(false)
+    }
+
+    /// The whole of the recording UI, most of the time: a mic glyph and a
+    /// narrow meter in the right wing, and nothing else on screen. Clicking it
+    /// is what opens the options — but the click is taken by the hover sensor
+    /// window above, not here, so this stays as inert as the disc beside it.
+    ///
+    /// The mic is the left of the pair so the row reads "recording: <this
+    /// loud>", and the meter trails inward toward the notch.
+    private var recordingIndicator: some View {
+        let visible = hasRecordingIndicator && !isExpanded
+        return HStack(spacing: Self.recordingGap) {
+            Image(systemName: voice.isPaused ? "pause.fill" : "mic.fill")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(voice.isPaused ? .white.opacity(0.55) : .red)
+                .frame(width: Self.recordingGlyph)
+            LevelMeter(level: voice.level, bars: 7, spacing: 2)
+                .frame(width: Self.recordingMeterWidth, height: Self.recordingMeterHeight)
+        }
+        // Pinned so the offset below can centre it exactly, the way the disc's
+        // own `discSize` does — the glyph alone is a hair taller than the meter.
+        .frame(height: Self.recordingMeterHeight)
+        // Mirror of the mini player's offset, sized to this wing's own content
+        // rather than the disc's.
+        .offset(
+            x: bareNotchWidth / 2 + (wingWidth - Self.flare) / 2,
+            y: (collapsedHeight - Self.recordingMeterHeight) / 2
+        )
+        .opacity(visible ? 1 : 0)
+        .scaleEffect(visible ? 1 : 0.6)
+        .animation(.spring(response: 0.36, dampingFraction: 0.8), value: hasRecordingIndicator)
         .animation(contentFade, value: isExpanded)
         .allowsHitTesting(false)
     }
@@ -636,7 +767,7 @@ struct NotchPromptView: View {
             // Mirror of the mini player's offset: centred in the usable part of
             // the right wing, which ends `flare` short of the rect.
             .offset(
-                x: bareNotchWidth / 2 + (Self.miniWing - Self.flare) / 2,
+                x: bareNotchWidth / 2 + (wingWidth - Self.flare) / 2,
                 y: (collapsedHeight - Self.discSize) / 2
             )
             .opacity(visible ? 1 : 0)
@@ -663,6 +794,10 @@ struct NotchPromptView: View {
                     .id(prompt.id)
             } else if shownIdle == .game, let snake {
                 SnakeSurface(coordinator: coordinator, game: snake)
+            } else if shownIdle == .voice {
+                VoiceSurface(coordinator: coordinator, store: voice)
+            } else if shownIdle == .mirror, let mirror {
+                MirrorSurface(coordinator: coordinator, session: mirror)
             } else if shownIdle == .clipboard {
                 ClipboardCard(store: clipboard, coordinator: coordinator)
             } else if shownIdle == .peek {
@@ -670,7 +805,8 @@ struct NotchPromptView: View {
                     coordinator: coordinator,
                     media: media,
                     shelf: shelf,
-                    clipboard: clipboard
+                    clipboard: clipboard,
+                    voice: voice
                 )
             }
         }
@@ -739,6 +875,17 @@ struct NotchPromptView: View {
             if snake == nil { snake = SnakeGame() }
             setIdleContent(.game)
             expandOnceMeasured()
+        case .voice:
+            shownPrompt = nil
+            setIdleContent(.voice)
+            expandOnceMeasured()
+        case .mirror:
+            shownPrompt = nil
+            // Built on first open, like the Snake board: the camera session
+            // costs nothing to someone who never opens the mirror.
+            if mirror == nil { mirror = MirrorSession() }
+            setIdleContent(.mirror)
+            expandOnceMeasured()
         case .clipboard:
             shownPrompt = nil
             setIdleContent(.clipboard)
@@ -801,9 +948,12 @@ struct PeekCard: View {
     let media: MediaMonitor
     let shelf: ShelfStore
     let clipboard: ClipboardStore
+    let voice: VoiceNoteStore
 
     @State private var clipboardHovered = false
     @State private var gameHovered = false
+    @State private var voiceHovered = false
+    @State private var mirrorHovered = false
 
     /// Left column is exactly the cover, so the transport underneath lines up
     /// with its edges.
@@ -840,6 +990,8 @@ struct PeekCard: View {
                 .foregroundStyle(.white.opacity(0.6))
             Spacer()
             gameChip
+            mirrorChip
+            voiceChip
             clipboardChip
             if !coordinator.stranded.isEmpty {
                 Text("\(coordinator.stranded.count) waiting")
@@ -901,6 +1053,47 @@ struct PeekCard: View {
         .onHover { gameHovered = $0 }
         .animation(.easeOut(duration: 0.14), value: gameHovered)
         .accessibilityLabel("Play Snake")
+    }
+
+    /// The way into the mirror. Glyph only and the same quiet weight as the
+    /// game chip: like Snake it is somewhere you go rather than something you
+    /// summon, and it has no hotkey to advertise.
+    private var mirrorChip: some View {
+        Button { coordinator.openMirror() } label: {
+            Image(systemName: "person.crop.square")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.white.opacity(mirrorHovered ? 0.7 : 0.35))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(.white.opacity(mirrorHovered ? 0.14 : 0.08), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { mirrorHovered = $0 }
+        .animation(.easeOut(duration: 0.14), value: mirrorHovered)
+        .accessibilityLabel("Open the mirror")
+    }
+
+    /// The way into voice notes, for anyone who hasn't learned ⇧⌘M — or whose
+    /// ⇧⌘M is owned by another app. A filled mic when notes exist, the same
+    /// weight the clipboard chip uses for "there's something in here".
+    private var voiceChip: some View {
+        Button { coordinator.openVoice() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: voice.notes.isEmpty ? "mic" : "mic.fill")
+                if !voice.notes.isEmpty {
+                    Text("\(voice.notes.count)").monospacedDigit()
+                }
+            }
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.white.opacity(voiceHovered ? 0.75 : 0.45))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(.white.opacity(voiceHovered ? 0.14 : 0.08), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { voiceHovered = $0 }
+        .animation(.easeOut(duration: 0.14), value: voiceHovered)
+        .accessibilityLabel("Open voice notes")
     }
 
     // MARK: Player column

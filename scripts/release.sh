@@ -45,7 +45,13 @@ if [[ ! -d "${app}" ]]; then
 fi
 
 echo "Ad-hoc signing…"
-codesign --force --deep --sign - "${app}"
+# Ad-hoc and no `--options runtime`, so the microphone entitlement isn't what
+# gates ⇧⌘M here — TCC is. Passing it anyway keeps this signature the same
+# shape as the local signed install's, so the two builds can't disagree about
+# what the app is allowed to do.
+codesign --force --deep \
+    --entitlements "${repo_dir}/notch-911/notch-911.entitlements" \
+    --sign - "${app}"
 codesign --verify --deep --strict --verbose=2 "${app}"
 
 # Stage only the app. create-dmg adds the Applications link itself; the

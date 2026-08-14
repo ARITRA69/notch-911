@@ -98,12 +98,15 @@ final class AppModel {
     /// already owns registers successfully and then never fires, with no API to
     /// detect it — but a failed registration is worth surfacing.
     private(set) var isClipboardHotkeyRegistered = false
+    private(set) var isVoiceHotkeyRegistered = false
 
     @ObservationIgnored let coordinator = PromptCoordinator()
     @ObservationIgnored let media = MediaMonitor()
     @ObservationIgnored let shelf = ShelfStore()
     @ObservationIgnored let clipboard = ClipboardStore()
+    @ObservationIgnored let voice = VoiceNoteStore()
     @ObservationIgnored private var clipboardHotkey: GlobalHotkey?
+    @ObservationIgnored private var voiceHotkey: GlobalHotkey?
 
     @ObservationIgnored private var server: HookServer?
     @ObservationIgnored private var panelController: NotchPanelController?
@@ -170,7 +173,8 @@ final class AppModel {
             coordinator: coordinator,
             media: media,
             shelf: shelf,
-            clipboard: clipboard
+            clipboard: clipboard,
+            voice: voice
         )
         // Visibility is no longer just "is there a prompt": the collapsed mini
         // player has to keep the panel on screen whenever music is playing.
@@ -195,9 +199,18 @@ final class AppModel {
         clipboard.onCapture = { [weak self] in
             self?.refreshPanelVisibility()
         }
+        // A note being recorded keeps the panel on screen for its collapsed
+        // indicator, and tells the coordinator to leave the notch alone while
+        // it's up — see `PromptCoordinator.voiceIsCapturing`.
+        voice.onCaptureChange = { [weak self] in
+            guard let self else { return }
+            coordinator.voiceIsCapturing = voice.isCapturing
+            refreshPanelVisibility()
+        }
         media.start()
         clipboard.setCapturing(clipboardCapture)
         registerClipboardHotkey()
+        registerVoiceHotkey()
         startCodexQuestionWatcher()
 
         let server = HookServer(token: token) { [weak self] request in
@@ -234,6 +247,15 @@ final class AppModel {
         coordinator.releaseAll()
         clipboardHotkey?.invalidate()
         clipboardHotkey = nil
+        voiceHotkey?.invalidate()
+        voiceHotkey = nil
+        // A recording caught mid-quit is discarded, not transcribed and saved:
+        // the app is on its way out and there is no surface left to show the
+        // result on, and `cancel()` is the only one of the three stop paths
+        // that doesn't kick off an async transcription task racing the process
+        // teardown.
+        voice.cancel()
+        voice.stopPlayback()
         clipboard.flush()
         server?.stop()
     }
@@ -259,6 +281,44 @@ final class AppModel {
     func clearClipboardHistory() {
         clipboard.removeAll()
         append("cleared clipboard history")
+    }
+
+    /// Registered from `start()` for the same reason the clipboard hotkey is —
+    /// so a test run that grabbed a system-wide chord never reaches past the
+    /// test into the developer's own Mac.
+    private func registerVoiceHotkey() {
+        voiceHotkey = GlobalHotkey(
+            keyCode: UInt32(kVK_ANSI_M),
+            carbonModifiers: UInt32(cmdKey | shiftKey)
+        ) { [weak self] in
+            self?.toggleVoiceRecording()
+        }
+        isVoiceHotkeyRegistered = voiceHotkey != nil
+        append(isVoiceHotkeyRegistered
+               ? "⇧⌘M registered for voice notes"
+               : "⇧⌘M could not be registered — another app may already own it")
+    }
+
+    /// One key, two jobs, matched to whether anything is currently listening —
+    /// the same "toggle rather than open" shape ⇧⌘V uses for the clipboard,
+    /// except here the second press has somewhere to go: `stop()` doesn't just
+    /// close a picker, it hands back a note.
+    func toggleVoiceRecording() {
+        guard coordinator.current == nil else { return }
+        if voice.isCapturing {
+            voice.stop()
+        } else {
+            // Deliberately does *not* open the surface. Recording shows up as
+            // the indicator in the collapsed notch and nothing else; the panel
+            // only opens if the user clicks it to reach Discard / Pause / Save.
+            // A hotkey you press mid-sentence should not throw a window up.
+            voice.start()
+        }
+    }
+
+    func clearVoiceNotes() {
+        voice.removeAll()
+        append("cleared voice notes")
     }
 
     // MARK: Hook handling
@@ -473,7 +533,10 @@ final class AppModel {
     /// else orders it out.
     private func refreshPanelVisibility() {
         panelController?.setVisible(
-            coordinator.isInteractive || media.nowPlaying != nil || clipboard.justCaptured
+            coordinator.isInteractive
+                || media.nowPlaying != nil
+                || clipboard.justCaptured
+                || voice.isBusy
         )
     }
 
