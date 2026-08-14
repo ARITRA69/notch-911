@@ -18,6 +18,7 @@ struct StatusView: View {
     enum Tab: String, CaseIterable, Identifiable {
         case status = "Status"
         case clipboard = "Clipboard"
+        case voice = "Voice"
         case events = "Events"
 
         var id: String { rawValue }
@@ -26,6 +27,7 @@ struct StatusView: View {
             switch self {
             case .status: "gearshape"
             case .clipboard: "doc.on.clipboard"
+            case .voice: "waveform"
             case .events: "list.bullet.rectangle"
             }
         }
@@ -46,6 +48,7 @@ struct StatusView: View {
                     switch tab {
                     case .status: statusTab
                     case .clipboard: clipboardTab
+                    case .voice: voiceTab
                     case .events: eventsTab
                     }
                 }
@@ -99,6 +102,8 @@ struct StatusView: View {
                 clipboardRow
                 Divider().padding(.leading, 14)
                 clipboardStorageRow
+                Divider().padding(.leading, 14)
+                voiceRow
             }
         }
     }
@@ -346,6 +351,44 @@ struct StatusView: View {
         return model.isClipboardHotkeyRegistered ? .green : .orange
     }
 
+    /// Mirrors `accessibilityRow`: a permission that might still need a visit
+    /// to System Settings, stated plainly rather than discovered by pressing
+    /// the hotkey and getting silence. Recording works with the microphone
+    /// alone — a denied speech permission still shows green, since it only
+    /// costs the transcript, not the note.
+    private var voiceRow: some View {
+        row(color: voiceColor, title: "Voice notes", detail: voiceDetail) {
+            if model.voice.permission == .microphoneDenied {
+                Button("Enable") { model.voice.openMicrophoneSettings() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
+            Button("Clear") { model.clearVoiceNotes() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.voice.notes.isEmpty)
+        }
+    }
+
+    private var voiceColor: Color {
+        switch model.voice.permission {
+        case .microphoneDenied: return .orange
+        case .unknown, .ready, .speechDenied: return model.isVoiceHotkeyRegistered ? .green : .orange
+        }
+    }
+
+    private var voiceDetail: String {
+        if model.voice.permission == .microphoneDenied {
+            return "Microphone access needed — enable it, then press ⇧⌘M again."
+        }
+        guard model.isVoiceHotkeyRegistered else {
+            return "⇧⌘M could not be registered — another app may own it. "
+                + "The mic button in the notch peek always works."
+        }
+        let count = model.voice.notes.count
+        return "\(count) note\(count == 1 ? "" : "s") · ⇧⌘M records, on-device"
+    }
+
     private func toggleRow(isOn: Binding<Bool>, title: String, detail: String) -> some View {
         Toggle(isOn: isOn) {
             VStack(alignment: .leading, spacing: 2) {
@@ -488,6 +531,121 @@ struct StatusView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    // MARK: - Voice
+
+    /// The permanent home for what ⇧⌘M has produced — the notch surface shows
+    /// the same list, but it's a picker you glance at and close; this is where
+    /// you go to read a transcript in full or clean the list out.
+    private var voiceTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("\(model.voice.notes.count) note\(model.voice.notes.count == 1 ? "" : "s")")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if model.voice.permission == .microphoneDenied {
+                    Label("Microphone access needed", systemImage: "mic.slash")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+                Button("Clear all") { model.clearVoiceNotes() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(model.voice.notes.isEmpty)
+            }
+
+            if model.voice.notes.isEmpty {
+                emptyVoice
+            } else {
+                card {
+                    ForEach(Array(model.voice.notes.enumerated()), id: \.element.id) { index, note in
+                        if index > 0 { Divider().padding(.leading, 46) }
+                        voiceNoteRow(note)
+                    }
+                }
+            }
+        }
+    }
+
+    private var emptyVoice: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("No voice notes yet.")
+                .font(.callout.weight(.medium))
+            Text("⇧⌘M starts recording from anywhere. Speech is transcribed on this Mac; "
+                 + "if that isn't possible the recording itself is kept instead.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(cardShape.fill(.background.secondary))
+        .overlay(cardShape.strokeBorder(.separator.opacity(0.5), lineWidth: 1))
+    }
+
+    private func voiceNoteRow(_ note: VoiceNote) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Rectangle().fill(.background.secondary)
+                Image(systemName: note.isTranscript ? "text.quote" : "waveform")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 32, height: 32)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(voicePreview(note))
+                    .font(.callout)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                Text(voiceCaption(note))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            if !note.isTranscript {
+                Button(model.voice.playingID == note.id ? "Stop" : "Play") {
+                    model.voice.togglePlayback(note)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            Button(model.voice.justCopied == note.id ? "Copied" : "Copy") {
+                model.voice.copy(note)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Button {
+                model.voice.remove(note)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Remove this note")
+            .accessibilityLabel("Remove this note")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private func voicePreview(_ note: VoiceNote) -> String {
+        if case .transcript(let text) = note.content { return text }
+        return "Voice recording"
+    }
+
+    private func voiceCaption(_ note: VoiceNote) -> String {
+        let minutes = Int(note.duration) / 60
+        let seconds = Int(note.duration) % 60
+        let duration = String(format: "%d:%02d", minutes, seconds)
+        return "\(note.isTranscript ? "Transcript" : "Recording") · \(duration) · \(Self.clock.string(from: note.createdAt))"
     }
 
     private func errorBox(_ message: String) -> some View {
