@@ -32,6 +32,12 @@ nonisolated enum IdleSurface: Sendable, Equatable {
     /// no hotkey — it is somewhere you go, not something you summon over what
     /// you were doing.
     case mirror
+    /// "The agent finished." The only surface that arrives unbidden and leaves
+    /// on its own — everything else here is opened by the user and closed by
+    /// the user. It never takes the keyboard, which is what keeps it a
+    /// notification rather than an interruption; it does take clicks, because
+    /// clicking it is how you get to the agent that just finished.
+    case completion
     case none
 }
 
@@ -65,6 +71,11 @@ final class PromptCoordinator {
     /// move with it.
     private(set) var idleSurface: IdleSurface = .none
 
+    /// The completion banner on screen, if any. Nil whenever `idleSurface` is
+    /// anything other than `.completion`; the two are kept in step by
+    /// `setIdleSurface`, which is the only writer of either.
+    private(set) var completion: CompletionNotice?
+
     /// Kept as a computed property so the hover-peek call sites read the way
     /// they always did.
     var isPeeking: Bool { idleSurface == .peek }
@@ -72,6 +83,11 @@ final class PromptCoordinator {
     /// Anything that should stop the panel being click-through. The collapsed
     /// mini player deliberately isn't one — it's decoration, and a 720×620
     /// window that eats clicks for a 22pt disc is a bug.
+    /// The completion banner is included: clicking it brings the agent's app
+    /// forward, which it cannot do while clicks pass through it. That is a real
+    /// cost — for the few seconds a banner is up, the panel's footprint stops
+    /// being click-through — and it is why the banner's dwell is short and why
+    /// a click dismisses it immediately rather than only activating the app.
     var isInteractive: Bool { current != nil || idleSurface != .none }
 
     /// Surfaces allowed to take the keyboard. A peek never may: it opens on
@@ -91,6 +107,11 @@ final class PromptCoordinator {
 
     var agentStatus = AgentStatus()
 
+    /// How long a completion banner stays up. Long enough to read a project
+    /// name and a closing line at a glance, short enough that a busy agent
+    /// doesn't leave the notch permanently open.
+    static let completionDwellSeconds: Double = 4
+
     /// Dwell before the peek opens.
     static let peekDelayMilliseconds = 300
     /// Grace after the pointer leaves, so clipping the edge mid-gesture doesn't
@@ -98,6 +119,7 @@ final class PromptCoordinator {
     static let peekCloseGraceMilliseconds = 250
 
     @ObservationIgnored private var dwell: Task<Void, Never>?
+    @ObservationIgnored private var completionDismissal: Task<Void, Never>?
     @ObservationIgnored private var pointerOnSensor = false
     @ObservationIgnored private var pointerOnPanel = false
     /// Set when the peek is reached by an explicit act — the clipboard's back
@@ -123,6 +145,10 @@ final class PromptCoordinator {
     /// Called when the panel should become visible or go away.
     @ObservationIgnored var onVisibilityChange: ((Bool) -> Void)?
     @ObservationIgnored var onSubmitExternal: ((Prompt, [CodexQuestionAnswer]) -> Void)?
+    /// Fired when the user answers an observed permission card — one detected
+    /// by watching, not delivered by a hook. The receiver presses the real
+    /// button in the owning app.
+    @ObservationIgnored var onExternalPermission: ((Prompt, PermissionDecision) -> Void)?
     @ObservationIgnored var onExternalResolution: ((String) -> Void)?
 
     // MARK: Server side
@@ -231,6 +257,11 @@ final class PromptCoordinator {
     func resolve(_ prompt: Prompt, with response: PromptResponse) {
         guard let continuation = continuations.removeValue(forKey: prompt.id) else {
             guard externalPromptIDs.remove(prompt.id) != nil else { return }
+            // An observed permission card resolves by pressing the real button
+            // in the owning app — there is no blocked hook to answer.
+            if case .permission(let decision) = response, prompt.kind.isPermission {
+                onExternalPermission?(prompt, decision)
+            }
             if let externalID = prompt.externalID {
                 externalSubmissionStates.removeValue(forKey: externalID)
                 onExternalResolution?(externalID)
@@ -320,6 +351,15 @@ final class PromptCoordinator {
     ///    and ignores the Bool, so re-entering it is free.
     private func setIdleSurface(_ surface: IdleSurface) {
         let wasPeeking = idleSurface == .peek
+        // Every route away from the banner retires it here rather than at each
+        // call site — a hover peek, a new prompt, an answered one. Leaving the
+        // notice set while some other surface is up would let a later
+        // `.completion` transition flash a stale message from minutes ago.
+        if surface != .completion {
+            completionDismissal?.cancel()
+            completionDismissal = nil
+            completion = nil
+        }
         idleSurface = surface
         if surface != .peek {
             pointerOnPanel = false
@@ -545,6 +585,43 @@ final class PromptCoordinator {
     }
 
     // MARK: Private
+
+    // MARK: Completion banner
+
+    /// Shows "finished" for a few seconds, then takes it away again.
+    ///
+    /// Silently declines whenever the notch is busy. A blocked question
+    /// outranks a finished turn — §4 forbids two surfaces at once, and the
+    /// question is the one with someone waiting on it — and a surface the user
+    /// deliberately opened outranks one that arrived by itself. Dropping the
+    /// banner costs nothing; stealing the notch mid-paste costs trust.
+    func announce(_ notice: CompletionNotice) {
+        guard current == nil else { return }
+        switch idleSurface {
+        case .clipboard, .game, .voice, .mirror:
+            return
+        case .none, .peek, .completion:
+            break
+        }
+
+        dwell?.cancel()
+        completion = notice
+        setIdleSurface(.completion)
+
+        // Assigned after `setIdleSurface`, which cancels any dismissal still
+        // pending from the notice this one just replaced.
+        completionDismissal = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.completionDwellSeconds))
+            guard !Task.isCancelled else { return }
+            self?.dismissCompletion()
+        }
+    }
+
+    /// Takes the banner down early. Safe to call when nothing is showing.
+    func dismissCompletion() {
+        guard idleSurface == .completion else { return }
+        setIdleSurface(.none)
+    }
 
     private func present(_ prompt: Prompt) {
         // A prompt always wins over the idle surface. `current` is assigned

@@ -23,8 +23,21 @@ struct BrandMark: View {
         self.size = size
     }
 
+    /// The marks live in a `Logos` group with *Provides Namespace* set, so
+    /// their real catalog names carry the folder: `Logos/logo.claude`, not
+    /// `logo.claude`. Every call site passes the bare name, and a bare name
+    /// resolves to no image at all — SwiftUI draws nothing and reports nothing,
+    /// which is why four missing brand marks went unnoticed. Qualifying here
+    /// rather than at the call sites keeps the namespace a fact about the
+    /// catalog instead of something eight places have to remember.
+    private static let namespace = "Logos/"
+
+    private var qualifiedAsset: String {
+        asset.hasPrefix(Self.namespace) ? asset : Self.namespace + asset
+    }
+
     var body: some View {
-        Image(asset)
+        Image(qualifiedAsset)
             .resizable()
             .scaledToFit()
             .frame(width: size, height: size)

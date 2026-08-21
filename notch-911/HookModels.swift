@@ -130,6 +130,22 @@ nonisolated enum Agent: String, Sendable {
         }
     }
 
+    /// The desktop client to bring forward when a completion banner is
+    /// clicked. Codex's is `ChatGPT.app`, which carries the `com.openai.codex`
+    /// identifier rather than a ChatGPT one — the Codex desktop client is
+    /// shipped inside it.
+    ///
+    /// Claude Code is the looser fit of the two: it runs just as happily in a
+    /// terminal, and there is no way to ask a hook payload which window it came
+    /// from. Claude for Desktop is the best available guess, and a wrong guess
+    /// costs one unwanted app activation.
+    var desktopBundleID: String {
+        switch self {
+        case .claudeCode: return "com.anthropic.claudefordesktop"
+        case .codex: return "com.openai.codex"
+        }
+    }
+
     /// The agent's own mark, in `Assets.xcassets/Logos`. Codex is OpenAI's, and
     /// is the one mark of the four that ships monochrome.
     var logoAsset: String {

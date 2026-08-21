@@ -72,12 +72,18 @@ the release page in your browser, nothing downloads itself.
 A hook fires, the notch opens, you answer, the agent unblocks. Four shapes are
 supported, covering everything the two agents can actually put in front of you:
 
-| Prompt | Hook | Claude Code | Codex |
+| Prompt | Channel | Claude Code | Codex |
 | --- | --- | :---: | :---: |
-| Allow / deny | `PermissionRequest` | ✅ | ✅ |
-| Selects + **Other** | `AskUserQuestion` | ✅ | — |
-| Selects + text fields | `Elicitation` | ✅ | — |
-| Free text | `Stop` | ✅ | ✅ |
+| Allow / deny | `PermissionRequest` hook / rollout | ✅ | ✅ |
+| Selects + **Other** | `AskUserQuestion` hook | ✅ | — |
+| Selects + text fields | `Elicitation` hook | ✅ | — |
+| Free text | `Stop` hook | ✅ | ✅ |
+| Turn finished | `Stop` hook / rollout | ✅ | ✅ |
+
+Claude Code's column is all hooks. Codex's is not: its hooks are registered and
+have never once fired — its own `hook_runtime` logger is empty against 21k rows
+of other logging — so everything in the Codex column that works, works by
+observation instead. How, per row, is described below.
 
 The panel takes keystrokes without stealing focus and floats above fullscreen
 apps, so answering never switches your active window.
@@ -103,6 +109,90 @@ offered as a fallback.
 
 Grant access from the status window under **Direct Codex answers → Enable**, or
 in **System Settings → Privacy & Security → Accessibility**.
+
+### Codex approvals
+
+<div align="center">
+  <img src="docs/images/notch-codex-permission.png" width="560" alt="The notch showing a permission with Allow and Deny option">
+  <br>
+  <sub>When codex ask for permission it ask you on the notch</sub>
+</div>
+
+
+Codex's Allow/Deny prompts reach the notch by the same observe-don't-own route,
+split across the two channels by what each is actually good at:
+
+**Detection is the rollout.** An approval in the rollout is not a record type of
+its own — it is an ordinary tool call whose arguments carry an escalation marker
+(`require_escalated`, or a `request_permissions` grant) and the human-readable
+question Codex shows beside its buttons. While that call has no output record,
+the turn is blocked on you; the moment the output lands, it was answered. Disk
+is the one channel visible from every Space, it names the exact question and
+project, and it needs no permission at all.
+
+**Answering is Accessibility.** Choosing Allow or Deny in the notch presses the
+real button in the Codex window — the same machinery Direct Codex answers uses.
+The one platform limit sits here: macOS hides other Spaces' windows from the
+Accessibility API, so a press from a different Space is a round trip — Codex is
+told to bring itself forward (via Apple Events — `activate` from a background
+app is silently denied on modern macOS), the press lands, and you are returned
+to the app you were in. A failed press skips the return leg on purpose: the
+prompt still needs your eyes. First use asks you to allow notch-911 to control
+ChatGPT, and the return leg asks the same once per app it returns you to; that
+is this feature.
+
+Cards retract on real signals only: the answer record appearing in the rollout,
+the turn moving on without one (you interrupted, or answered a different way),
+or the turn completing.
+
+### When a turn finishes
+
+Both agents stop and wait for you. They also, eventually, *stop* — and until now
+the notch had nothing to say about it. A finished turn now puts a **Task
+complete** banner under the notch for a few seconds, with the project it
+happened in, the agent's closing line, and how long it took, then takes itself
+away.
+
+<div align="center">
+  <img src="docs/images/notch-task-complete.png" width="560" alt="The notch showing a Task complete banner: the Claude mark, the project name notch-911, and the agent's closing line beneath">
+  <br>
+  <sub>A finished turn. No buttons — the whole card is the target, and
+  clicking it opens the agent. Otherwise it leaves on its own.</sub>
+</div>
+
+It never blocks the agent. The `Stop` hook is answered the moment it arrives and
+the banner is drawn afterwards, so the turn ends at its normal speed whether or
+not anyone is looking at the screen. It never takes the keyboard either, so it
+can't swallow a keystroke meant for your editor.
+
+**Click it and the agent comes forward** — Claude for Desktop, or Codex, which
+ships inside `ChatGPT.app`. That is the one thing the banner does take: for the
+few seconds it is up, its footprint stops being click-through. A click both
+activates the app and dismisses the banner, so it never parks itself over the
+window you just asked to see.
+
+A blocked question always outranks it, as does any surface you opened yourself —
+if the clipboard is up, the banner is dropped rather than queued. Nothing is
+waiting on it, so there is nothing to lose.
+
+On by default, under **Say when a turn finishes**. That is a departure from the
+house posture of opt-in, and a deliberate one: the switch beside it,
+**Surface Stop events**, blocks the turn on a reply box and stays off, while
+this only costs a few seconds of notch.
+
+**Codex gets there by a different road.** Its `Stop` hook is registered in
+`~/.codex/hooks.json` in the documented shape, and Codex still has never run it:
+its own `hook_runtime` logger has zero entries against 21k rows of other
+logging. The registration is not the problem — hooks are loaded when a Codex
+session starts, and the Codex desktop client runs as a long-lived `app-server`
+daemon, so a `hooks.json` written after that daemon launched is not read until
+it restarts.
+
+Completions are therefore read from the `task_complete` records in
+`~/.codex/sessions`, the same observe-don't-own trick **Direct Codex answers**
+uses above. That is not just a workaround: the rollout record carries the turn's
+duration, which the hook would never have given us, and it keeps working
+regardless of when the daemon last started.
 
 ### Now playing
 

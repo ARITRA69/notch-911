@@ -331,7 +331,11 @@ extension NotchPanelController: NSWindowDelegate {
             // Same "never mind" as the clipboard, and more urgent than any of
             // them: the camera light burns for as long as this surface is up.
             case .mirror: coordinator.closeMirror()
-            case .peek, .none: break
+            // The banner is never key in the first place — it is click-through
+            // by construction — and it owns its own dismissal timer. Closing it
+            // on a focus change it can't receive would be dead code that reads
+            // as intent.
+            case .completion, .peek, .none: break
             }
         }
     }
@@ -477,6 +481,11 @@ struct NotchPromptView: View {
 
     private static let flare: CGFloat = 12
     private static let promptWidth: CGFloat = 520
+
+    /// Narrower than a prompt on purpose. Nothing here is answerable, so the
+    /// surface only has to carry a mark, a project name and one line — sizing
+    /// it like a question would promise an interaction that isn't there.
+    private static let completionWidth: CGFloat = 440
     // Three columns: 56pt cover + centre + the shelf's fixed 136pt.
     private static let peekWidth: CGFloat = 540
     /// Wide enough for a two-line text snippet beside a 32pt thumbnail and a
@@ -556,6 +565,7 @@ struct NotchPromptView: View {
         // exists to avoid.
         else if shownIdle == .voice { content = voice.isBusy ? Self.voiceOptionsWidth : Self.voiceWidth }
         else if shownIdle == .mirror { content = Self.mirrorWidth }
+        else if shownIdle == .completion { content = Self.completionWidth }
         else { content = Self.peekWidth }
         return content + Self.flare * 2
     }
@@ -800,6 +810,12 @@ struct NotchPromptView: View {
                 MirrorSurface(coordinator: coordinator, session: mirror)
             } else if shownIdle == .clipboard {
                 ClipboardCard(store: clipboard, coordinator: coordinator)
+            } else if shownIdle == .completion, let notice = coordinator.completion {
+                CompletionCard(notice: notice, coordinator: coordinator)
+                    // Fresh identity per notice so a second completion arriving
+                    // while the first is still up re-runs the entry animation
+                    // instead of silently swapping the text underneath it.
+                    .id(notice.id)
             } else if shownIdle == .peek {
                 PeekCard(
                     coordinator: coordinator,
@@ -889,6 +905,10 @@ struct NotchPromptView: View {
         case .clipboard:
             shownPrompt = nil
             setIdleContent(.clipboard)
+            expandOnceMeasured()
+        case .completion:
+            shownPrompt = nil
+            setIdleContent(.completion)
             expandOnceMeasured()
         case .peek:
             shownPrompt = nil

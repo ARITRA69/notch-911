@@ -95,6 +95,8 @@ struct StatusView: View {
             if let error = model.setupError { errorBox(error) }
 
             card {
+                completionRow
+                Divider().padding(.leading, 14)
                 stopRow
                 Divider().padding(.leading, 14)
                 youTubeMusicRow
@@ -227,6 +229,16 @@ struct StatusView: View {
             return "Accessibility required once · \(model.signatureStatus.detail)"
         }
         return model.signatureStatus.detail
+    }
+
+    private var completionRow: some View {
+        toggleRow(
+            isOn: $model.announceCompletion,
+            title: "Say when a turn finishes",
+            detail: "A \"task complete\" banner in the notch for a few seconds when Claude Code or "
+                + "Codex finishes. Never blocks the agent. Codex is read from its own session logs, "
+                + "because its hooks do not fire."
+        )
     }
 
     private var stopRow: some View {

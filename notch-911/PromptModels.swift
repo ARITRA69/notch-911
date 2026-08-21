@@ -116,6 +116,11 @@ nonisolated enum PromptKind: Sendable {
     case freeText(placeholder: String)
     case externalQuestion
 
+    var isPermission: Bool {
+        if case .permission = self { return true }
+        return false
+    }
+
     /// True when the surface contains a text field, which changes the keyboard
     /// map: bare digits would otherwise be swallowed by typing.
     var hasTextEntry: Bool {
@@ -477,5 +482,70 @@ nonisolated enum ElicitationSchema {
             return Choice(value: raw, label: index < names.count ? names[index] : raw)
         }
         return choices.isEmpty ? nil : choices
+    }
+}
+
+// MARK: - Turn completion
+
+/// "The agent finished" — the one notch surface that isn't a question.
+///
+/// Deliberately not a `Prompt`. A `Prompt` exists to carry an answer back to a
+/// blocked agent, and every part of that machinery — the continuation map, the
+/// waiting queue, the keyboard map — is wrong for something nobody has to
+/// answer. Announcing a completion must never hold a turn open, so this rides
+/// its own path and the hook it came from is released immediately.
+nonisolated struct CompletionNotice: Sendable, Identifiable, Equatable {
+    let id: UUID
+    let agent: Agent
+    let cwd: String
+    /// The agent's closing message, already trimmed for display. May be empty.
+    let summary: String
+    /// Wall time for the turn, when the source knew it. Claude Code's `Stop`
+    /// payload doesn't carry one; Codex's rollout record does.
+    let duration: TimeInterval?
+    let receivedAt: Date
+
+    init(
+        id: UUID = UUID(),
+        agent: Agent,
+        cwd: String,
+        summary: String,
+        duration: TimeInterval? = nil,
+        receivedAt: Date = Date()
+    ) {
+        self.id = id
+        self.agent = agent
+        self.cwd = cwd
+        self.summary = Self.trim(summary)
+        self.duration = duration
+        self.receivedAt = receivedAt
+    }
+
+    var projectName: String {
+        let name = (cwd as NSString).lastPathComponent
+        return name.isEmpty ? "unknown" : name
+    }
+
+    /// `4s`, `1m 12s`. Nil when the source didn't report one, which the card
+    /// reads as "show nothing" rather than "show zero".
+    var durationText: String? {
+        guard let duration, duration >= 1 else { return nil }
+        let total = Int(duration.rounded())
+        let minutes = total / 60
+        let seconds = total % 60
+        return minutes > 0 ? "\(minutes)m \(seconds)s" : "\(seconds)s"
+    }
+
+    /// One line, bounded. The banner is on screen for a few seconds and sized
+    /// for a glance — a closing message can run to paragraphs, and letting it
+    /// set the panel's height would make the notch lurch open at full size.
+    private static func trim(_ text: String) -> String {
+        let flattened = text
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+        let collapsed = flattened.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
+        let cleaned = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.count > 140 ? String(cleaned.prefix(140)) + "…" : cleaned
     }
 }

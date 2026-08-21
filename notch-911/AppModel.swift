@@ -58,6 +58,26 @@ final class AppModel {
         }
     }
 
+    /// Says "finished" when a turn ends, then gets out of the way.
+    ///
+    /// On by default, where `surfaceStop` is off, because the two do different
+    /// things with the same signal. `surfaceStop` *blocks* the turn on a reply
+    /// box — real cost, worth asking first. This only shows a banner for a few
+    /// seconds and releases the hook immediately, so the cost of it being wrong
+    /// is a few seconds of notch, and a completion notice nobody switched on is
+    /// a completion notice nobody knows exists.
+    var announceCompletion: Bool {
+        didSet {
+            UserDefaults.standard.set(announceCompletion, forKey: "notchd.announceCompletion")
+            reapplyRegistrations()
+            startCodexCompletionWatcher()
+            if !announceCompletion { coordinator.dismissCompletion() }
+            append(announceCompletion
+                   ? "completion notices on"
+                   : "completion notices off")
+        }
+    }
+
     /// Spotify and Music.app answer for themselves; YouTube Music only exists as
     /// a browser tab, so reading it means controlling the browser — every tab's
     /// URL — plus the browser's own "Allow JavaScript from Apple Events" switch.
@@ -111,8 +131,15 @@ final class AppModel {
     @ObservationIgnored private var server: HookServer?
     @ObservationIgnored private var panelController: NotchPanelController?
     @ObservationIgnored private let codexQuestionWatcher = CodexPlanQuestionWatcher()
+    @ObservationIgnored private let codexCompletionWatcher = CodexCompletionWatcher()
+    @ObservationIgnored private let codexApprovalWatcher = CodexApprovalWatcher()
     @ObservationIgnored private let codexAccessibilityBridge: any CodexQuestionSubmitting = CodexAccessibilityBridge()
     @ObservationIgnored private var codexQuestionTask: Task<Void, Never>?
+    @ObservationIgnored private var codexCompletionTask: Task<Void, Never>?
+    @ObservationIgnored private var codexApprovalTask: Task<Void, Never>?
+    /// Approval cards currently on screen, so a turn completion can retract
+    /// them: a completed turn cannot still be waiting on an approval.
+    @ObservationIgnored private var activeCodexApprovalIDs: Set<String> = []
     @ObservationIgnored private var codexSubmissionTimeouts: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var codexSubmissionCancellations: [String: CodexSubmissionCancellation] = [:]
     @ObservationIgnored
@@ -126,6 +153,12 @@ final class AppModel {
         UserDefaults.standard.set(fresh, forKey: key)
         return fresh
     }()
+
+    /// Whether the `Stop` hook needs registering at all. Two unrelated features
+    /// ride the same event, and it must stay registered while *either* wants
+    /// it — deriving it from `surfaceStop` alone silently unregisters the hook
+    /// out from under the completion banner.
+    private var registersStopHook: Bool { surfaceStop || announceCompletion }
 
     /// Exact-match routing. `hasSuffix` would be ambiguous once Codex's paths
     /// share the `/notchd/` prefix.
@@ -142,7 +175,9 @@ final class AppModel {
         // `UserDefaults.bool(forKey:)` answers false for an unset key, so a
         // default of *on* has to be registered rather than assumed.
         UserDefaults.standard.register(defaults: [ClipboardStore.captureDefaultsKey: true])
+        UserDefaults.standard.register(defaults: ["notchd.announceCompletion": true])
         surfaceStop = UserDefaults.standard.bool(forKey: "notchd.surfaceStop")
+        announceCompletion = UserDefaults.standard.bool(forKey: "notchd.announceCompletion")
         youTubeMusic = UserDefaults.standard.bool(forKey: MediaController.youTubeMusicDefaultsKey)
         clipboardCapture = UserDefaults.standard.bool(forKey: ClipboardStore.captureDefaultsKey)
     }
@@ -212,6 +247,11 @@ final class AppModel {
         registerClipboardHotkey()
         registerVoiceHotkey()
         startCodexQuestionWatcher()
+        startCodexCompletionWatcher()
+        startCodexApprovalWatcher()
+        coordinator.onExternalPermission = { [weak self] prompt, decision in
+            self?.submitCodexApproval(prompt, decision: decision)
+        }
 
         let server = HookServer(token: token) { [weak self] request in
             await self?.handle(request) ?? .noDecision
@@ -240,6 +280,10 @@ final class AppModel {
     func shutDown() {
         codexQuestionTask?.cancel()
         codexQuestionTask = nil
+        codexCompletionTask?.cancel()
+        codexCompletionTask = nil
+        codexApprovalTask?.cancel()
+        codexApprovalTask = nil
         for task in codexSubmissionTimeouts.values { task.cancel() }
         codexSubmissionTimeouts.removeAll()
         for cancellation in codexSubmissionCancellations.values { cancellation.cancel() }
@@ -337,6 +381,27 @@ final class AppModel {
 
         append("\(route.agent.displayName) · \(prompt.projectName): \(prompt.title.prefix(50))")
 
+        // A finished turn is news, not a question, so it never joins the
+        // waiting queue. Awaiting `coordinator.response` here would hold the
+        // agent's `Stop` hook open for as long as the banner is on screen —
+        // turning a notification into a four-second stall on every turn.
+        //
+        // `surfaceStop` wins when both are on: its reply box already says the
+        // turn ended, and stacking a banner in front of it would cover the one
+        // surface the user asked to be blocked by.
+        if route.event == .stop, !surfaceStop {
+            if announceCompletion {
+                coordinator.announce(
+                    CompletionNotice(
+                        agent: route.agent,
+                        cwd: prompt.cwd,
+                        summary: prompt.summary
+                    )
+                )
+            }
+            return .noDecision
+        }
+
         guard let response = await coordinator.response(to: prompt),
               let body = response.body(for: route.event)
         else {
@@ -355,6 +420,82 @@ final class AppModel {
     /// Codex App plan questions do not emit a lifecycle hook. Observe the
     /// unresolved `request_user_input` calls in its local task rollouts and
     /// remove cards when the matching output is persisted.
+    /// Codex's turn-completion signal, taken from the same rollout logs the
+    /// plan-question watcher reads.
+    ///
+    /// This exists because Codex's `Stop` hook does not fire — see the header
+    /// of `CodexCompletionWatcher`. Kept as its own loop rather than folded
+    /// into `startCodexQuestionWatcher` because it answers to a user setting
+    /// the other doesn't: someone who turns completion notices off should stop
+    /// paying for the directory scan, not just stop seeing the banner.
+    private func startCodexCompletionWatcher() {
+        codexCompletionTask?.cancel()
+        guard announceCompletion, isCodexInstalled else { return }
+        codexCompletionTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                for completion in await codexCompletionWatcher.poll() {
+                    if !activeCodexApprovalIDs.isEmpty {
+                        let stale = Array(activeCodexApprovalIDs)
+                        activeCodexApprovalIDs.removeAll()
+                        for id in stale { coordinator.externalPromptResolved(id) }
+                        await codexApprovalWatcher.resolveExternally(stale)
+                    }
+                    coordinator.announce(
+                        CompletionNotice(
+                            agent: .codex,
+                            cwd: completion.cwd,
+                            summary: completion.lastAgentMessage,
+                            duration: completion.duration,
+                            receivedAt: completion.completedAt
+                        )
+                    )
+                    append("Codex · turn complete")
+                }
+                // Slower than the question watcher's 500ms. A question is
+                // someone waiting on you and worth finding fast; a finished
+                // turn a second late reads exactly the same.
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    /// Codex approval prompts, detected from Codex's rollout logs — the one
+    /// channel visible from every Space; see `CodexApprovalWatcher`'s header.
+    /// Detection needs no permission at all; only *answering* touches
+    /// Accessibility, over in `submitCodexApproval`.
+    private func startCodexApprovalWatcher() {
+        codexApprovalTask?.cancel()
+        guard isCodexInstalled else { return }
+        codexApprovalTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                let changes = await codexApprovalWatcher.poll()
+                for id in changes.resolvedIDs {
+                    activeCodexApprovalIDs.remove(id)
+                    coordinator.externalPromptResolved(id)
+                }
+                for approval in changes.appeared {
+                    activeCodexApprovalIDs.insert(approval.callID)
+                    let prompt = Prompt(
+                        agent: .codex,
+                        event: .permissionRequest,
+                        sessionId: approval.sessionID,
+                        cwd: approval.cwd,
+                        title: approval.question,
+                        summary: "",
+                        kind: .permission,
+                        receivedAt: approval.receivedAt,
+                        externalID: approval.callID
+                    )
+                    coordinator.observe(prompt)
+                    append("Codex · approval: \(approval.question.prefix(50))")
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
     private func startCodexQuestionWatcher() {
         codexQuestionTask?.cancel()
         codexQuestionTask = Task { [weak self] in
@@ -396,6 +537,67 @@ final class AppModel {
         append(accessibilityTrusted
                ? "Accessibility enabled for direct Codex answers"
                : "Accessibility permission requested")
+    }
+
+    /// Presses the real Allow/Deny in the Codex window. The card is already
+    /// resolved by the time this runs — fire-and-forget, with one fallback:
+    /// when the window is on another Space the press cannot land there, so
+    /// Codex is activated (which brings its Space forward) and the press is
+    /// retried while the window becomes visible to Accessibility.
+    private func submitCodexApproval(_ prompt: Prompt, decision: PermissionDecision) {
+        guard let externalID = prompt.externalID else { return }
+        activeCodexApprovalIDs.remove(externalID)
+        let question = prompt.title
+        Task { [weak self] in
+            guard let self else { return }
+            let allow = decision == .allow
+            if await codexApprovalWatcher.press(question: question, allow: allow) {
+                append("Codex · approval \(decision.rawValue) pressed")
+                return
+            }
+            append("Codex · approval press blocked — bringing Codex forward")
+            // The trip to Codex is not optional: macOS hides other Spaces'
+            // windows from Accessibility, so the button can only be pressed
+            // while Codex's Space is frontmost. What *is* optional is
+            // stranding the user there — remember where they were, make the
+            // trip, and put them back.
+            let cameFrom = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            // Not `NSRunningApplication.activate`: macOS's cooperative
+            // activation rules silently deny focus changes requested by a
+            // background app, and this panel never becomes the active app even
+            // when clicked. Telling an app to activate *itself* over Apple
+            // Events is the one route that is always honoured — the same
+            // out-of-process `osascript` pattern `MediaController` uses. First
+            // use asks the user to allow notch-911 to control each app.
+            Self.activateApp(bundleID: CodexApprovalWatcher.bundleID)
+            var landed = false
+            for _ in 0..<8 {
+                try? await Task.sleep(for: .milliseconds(400))
+                if await codexApprovalWatcher.press(question: question, allow: allow) {
+                    landed = true
+                    break
+                }
+            }
+            append(landed
+                   ? "Codex · approval \(decision.rawValue) pressed after activation"
+                   : "Codex · approval press failed — answer in the Codex window")
+            // Return only after a successful press. A failed press means the
+            // prompt still needs the user's eyes, and yanking them away from
+            // it would hide the very thing they have to deal with.
+            if landed, let cameFrom, cameFrom != CodexApprovalWatcher.bundleID {
+                try? await Task.sleep(for: .milliseconds(400))
+                Self.activateApp(bundleID: cameFrom)
+            }
+        }
+    }
+
+    /// Self-activation over Apple Events — the only focus-change request
+    /// modern macOS reliably honours from a background app.
+    private static func activateApp(bundleID: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", "tell application id \"\(bundleID)\" to activate"]
+        try? process.run()
     }
 
     private func submitCodexQuestion(_ prompt: Prompt, answers: [CodexQuestionAnswer]) {
@@ -477,7 +679,7 @@ final class AppModel {
     func connect() {
         guard let port else { return }
         do {
-            try ClaudeSettings.connect(port: port, token: token, includeStop: surfaceStop)
+            try ClaudeSettings.connect(port: port, token: token, includeStop: registersStopHook)
             isConnected = true
             setupError = nil
             refreshStatus()
@@ -504,7 +706,7 @@ final class AppModel {
     func connectCodex() {
         guard let port else { return }
         do {
-            try CodexSettings.connect(port: port, token: token, includeStop: surfaceStop)
+            try CodexSettings.connect(port: port, token: token, includeStop: registersStopHook)
             isCodexConnected = true
             setupError = nil
             refreshStatus()
@@ -556,10 +758,10 @@ final class AppModel {
         guard let port else { return }
         do {
             if ClaudeSettings.isConnected() {
-                try ClaudeSettings.connect(port: port, token: token, includeStop: surfaceStop)
+                try ClaudeSettings.connect(port: port, token: token, includeStop: registersStopHook)
             }
             if CodexSettings.isConnected() {
-                try CodexSettings.connect(port: port, token: token, includeStop: surfaceStop)
+                try CodexSettings.connect(port: port, token: token, includeStop: registersStopHook)
             }
         } catch {
             setupError = error.localizedDescription
