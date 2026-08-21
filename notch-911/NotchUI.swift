@@ -352,3 +352,86 @@ extension Agent {
         }
     }
 }
+
+// MARK: - Counter
+
+/// One number and what it counts, for the row of them across the top of Home.
+///
+/// Display-only, deliberately. A tile that is sometimes tappable and sometimes
+/// not is a worse control than one that never is — the rows underneath are the
+/// interactive part of that surface.
+struct NotchStat: View {
+    let value: Int
+    let label: String
+    /// `nil` keeps it on the usual white ladder. A tint is for a count that
+    /// means something the moment it stops being zero.
+    var tint: Color?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("\(value)")
+                .font(.title3.weight(.medium).monospacedDigit())
+                .foregroundStyle(tint ?? .white.opacity(NotchInk.primary))
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(NotchInk.tertiary))
+        }
+        // A floor rather than a fixed width: the row must not re-flow when a
+        // count crosses from 9 to 10, and must still fit "Answered".
+        .frame(minWidth: 64, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            .white.opacity(NotchInk.fill),
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(value) \(label)")
+    }
+}
+
+// MARK: - A blocked prompt
+
+/// One prompt still waiting on an answer, with the way back to it.
+///
+/// Extracted from `PeekCard`, which had hand-rolled it; Home needs the same row
+/// and a fourth copy of it was not worth writing. Both callers lay it out with a
+/// `Spacer`, so it takes the peek's 284pt column and Home's ~544pt without
+/// either needing a variant of its own.
+struct StrandedRow: View {
+    let prompt: Prompt
+    let onResume: () -> Void
+
+    var body: some View {
+        Button(action: onResume) {
+            HStack(spacing: 8) {
+                // The tint only reaches OpenAI's template mark; the opacity is
+                // what keeps Claude's coloured one at the same visual weight.
+                BrandMark(prompt.agent.logoAsset, size: 11)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .opacity(0.75)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(prompt.projectName)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.85))
+                    Text(prompt.title)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(NotchInk.tertiary))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Text("Resume")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(
+                .white.opacity(0.05),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Resume \(prompt.projectName), \(prompt.title)")
+    }
+}

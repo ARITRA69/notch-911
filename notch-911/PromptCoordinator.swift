@@ -111,11 +111,17 @@ final class PromptCoordinator {
     /// stop at the start of that window rather than the end of it.
     var isGameLive: Bool { current == nil && idleSurface == .game }
 
-    /// True only while the Agents tab is genuinely the thing on the notch. The
-    /// session scan keys off this and nothing else: it reads the disk, and this
-    /// app does nothing when idle.
-    var isAgentsTabLive: Bool {
-        current == nil && idleSurface == .tabs && selectedTab == .agents
+    /// True only while a tab that shows sessions is genuinely the thing on the
+    /// notch. The session scan keys off this and nothing else: it reads the
+    /// disk, and this app does nothing when idle.
+    ///
+    /// Two tabs, not one. Home counts sessions as well as listing the running
+    /// ones, so gating on Agents alone would open Home on a stale list — or an
+    /// empty one, the first time. Media and Tools still scan nothing: reading a
+    /// track is not a reason to go looking through transcripts.
+    var isSessionListLive: Bool {
+        current == nil && idleSurface == .tabs
+            && (selectedTab == .home || selectedTab == .agents)
     }
 
     /// Surfaces allowed to take the keyboard. A peek never may: it opens on
@@ -149,7 +155,7 @@ final class PromptCoordinator {
     /// own `@State` so it outlives the collapse: the content stays mounted for
     /// 800ms after the surface closes and is then torn down, which would put
     /// view state back to `.agents` every time.
-    private(set) var selectedTab: NotchTab = .agents
+    private(set) var selectedTab: NotchTab = .home
 
     /// Per-session permission policy, mirrored out of `PolicyStore` so the UI
     /// observes it. `UserDefaults` publishes nothing SwiftUI can watch, and a

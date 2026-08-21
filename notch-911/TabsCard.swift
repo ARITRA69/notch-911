@@ -23,6 +23,9 @@
 import SwiftUI
 
 nonisolated enum NotchTab: String, CaseIterable, Identifiable, Sendable {
+    /// Triage, and where a click lands. First because `allCases` order *is* the
+    /// tab-bar order and the `[`/`]` order.
+    case home
     case agents
     case media
     case tools
@@ -31,6 +34,7 @@ nonisolated enum NotchTab: String, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
+        case .home: return "Home"
         case .agents: return "Agents"
         case .media: return "Media"
         case .tools: return "Tools"
@@ -40,6 +44,7 @@ nonisolated enum NotchTab: String, CaseIterable, Identifiable, Sendable {
     /// Matching `StatusView.Tab`, which is the house pattern for this.
     var symbol: String {
         switch self {
+        case .home: return "square.grid.2x2"
         case .agents: return "sparkles"
         case .media: return "play.circle"
         case .tools: return "wrench.and.screwdriver"
@@ -70,6 +75,7 @@ struct TabsCard: View {
             tabBar
             Group {
                 switch coordinator.selectedTab {
+                case .home: HomeTab(coordinator: coordinator, sessions: sessions)
                 case .agents: agentsTab
                 case .media: mediaTab
                 case .tools: toolsTab

@@ -115,11 +115,26 @@ opens on its own after a moment and closes when you leave, and it never takes
 the keyboard — a hover surface that swallowed the next keystroke meant for your
 editor would be unforgivable.
 
-**Click** the notch for somewhere to look around: **Agents**, **Media**,
-**Tools**. `[` and `]` move between them, `⎋` closes. Media and Tools are
-doorways into the surfaces that were already there — mirror, reels, clipboard,
-voice notes, Snake, and the shelf with room to breathe rather than squeezed into
-a 136pt column.
+**Click** the notch for somewhere to look around: **Home**, **Agents**,
+**Media**, **Tools**. `[` and `]` move between them, `⎋` closes. Media and Tools
+are doorways into the surfaces that were already there — mirror, reels,
+clipboard, voice notes, Snake, and the shelf with room to breathe rather than
+squeezed into a 136pt column.
+
+### Home
+
+A click lands here. Four counters — **waiting**, **running**, **idle**, and
+**answered** once anything has been answered for you — over the one list that
+matters: everything blocked, each row a **Resume** away from the card you left,
+then everything currently running.
+
+Idle sessions are a number here and rows one tab over. A surface hanging off a
+notch gets about a second of attention, and spending it on sessions that aren't
+doing anything is spending it badly.
+
+Home is triage; **Agents** is configuration. That split is the only reason they
+are two tabs, so Home stays read-only apart from Resume — put a mode control on
+it and it simply becomes Agents.
 
 ### Agents, and what a session mode actually does
 
@@ -534,7 +549,8 @@ notch-911/
   PromptCoordinator.swift          Prompt queue and resolution
   NotchPanel.swift                 The notch surface
   NotchUI.swift                    Shared surface pieces: heading, chip, row, ink
-  TabsCard.swift                   Agents / Media / Tools
+  TabsCard.swift                   Home / Agents / Media / Tools
+  HomeTab.swift                    Counters, what's blocked, what's running
   AgentSessions.swift              Session discovery from both agents' own logs
   PermissionPolicy.swift           What a session mode answers, and what it never does
   PlanCard.swift                   The ExitPlanMode surface
@@ -557,7 +573,7 @@ notch-911/
   CodexAccessibilityBridge.swift   Accessibility submission
   CodeSignatureInspector.swift     Signing diagnostics
   UpdateChecker.swift              Daily GitHub Releases check + menu item
-notch-911Tests/                    Fourteen suites
+notch-911Tests/                    Fifteen suites
 scripts/                           Signing identity, installer, release DMG, icon and backdrop generators
 docs/images/                       README assets
 ```

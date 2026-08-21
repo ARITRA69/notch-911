@@ -958,10 +958,9 @@ struct NotchPromptView: View {
         // had left the screen and bank the worse score.
         snake?.setRunning(coordinator.isGameLive)
         // Same edge, same reason: the session scan touches the disk, and the
-        // app is supposed to do nothing when idle. Only the Agents tab, not the
-        // whole tabbed surface — reading Media or Tools is not a reason to
-        // start listing transcripts.
-        sessions.setVisible(coordinator.isAgentsTabLive)
+        // app is supposed to do nothing when idle. Only the tabs that show
+        // sessions — Home and Agents — not the whole tabbed surface.
+        sessions.setVisible(coordinator.isSessionListLive)
 
         if let prompt = coordinator.current {
             shownPrompt = prompt
@@ -1374,7 +1373,7 @@ struct PeekCard: View {
         } else {
             VStack(spacing: 4) {
                 ForEach(coordinator.stranded.prefix(2)) { prompt in
-                    strandedRow(prompt)
+                    StrandedRow(prompt: prompt) { coordinator.resurface(prompt) }
                 }
             }
             if coordinator.stranded.count > 2 {
@@ -1398,38 +1397,6 @@ struct PeekCard: View {
         // Position only refreshes once a second; easing it stops the bar from
         // stepping.
         .animation(.linear(duration: 0.9), value: track.position)
-    }
-
-    private func strandedRow(_ prompt: Prompt) -> some View {
-        Button {
-            coordinator.resurface(prompt)
-        } label: {
-            HStack(spacing: 8) {
-                // The tint only reaches OpenAI's template mark; the opacity is
-                // what keeps Claude's coloured one at the same visual weight.
-                BrandMark(prompt.agent.logoAsset, size: 11)
-                    .foregroundStyle(.white.opacity(0.75))
-                    .opacity(0.75)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(prompt.projectName)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.85))
-                    Text(prompt.title)
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.45))
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 6)
-                Text("Resume")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.7))
-            }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 6)
-            .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Resume \(prompt.projectName), \(prompt.title)")
     }
 
     private var connectors: some View {
