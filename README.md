@@ -69,12 +69,13 @@ the release page in your browser, nothing downloads itself.
 
 ### Agent prompts, in the notch
 
-A hook fires, the notch opens, you answer, the agent unblocks. Four shapes are
+A hook fires, the notch opens, you answer, the agent unblocks. Five shapes are
 supported, covering everything the two agents can actually put in front of you:
 
 | Prompt | Hook | Claude Code | Codex |
 | --- | --- | :---: | :---: |
 | Allow / deny | `PermissionRequest` | ✅ | ✅ |
+| A plan, and three answers | `PermissionRequest` · `ExitPlanMode` | ✅ | — |
 | Selects + **Other** | `AskUserQuestion` | ✅ | — |
 | Selects + text fields | `Elicitation` | ✅ | — |
 | Free text | `Stop` | ✅ | ✅ |
@@ -88,6 +89,83 @@ apps, so answering never switches your active window.
   <sub>An <code>Elicitation</code> form — one single-select group, one
   multi-select group, every option on its own Command-number shortcut.</sub>
 </div>
+
+### Plan mode
+
+`ExitPlanMode` is the one prompt that isn't a yes-or-no. Claude Code asks it
+with three answers, and the notch asks it with the same three — the plan itself
+rendered as text rather than dumped as escaped JSON into a four-line box, which
+is what a plan used to look like here.
+
+| Button | What it does |
+| --- | --- |
+| **Auto-accept edits** | Approves the plan, and sets that session's mode to Accept edits |
+| **Manual edits** | Approves the plan, and leaves the session asking about each call |
+| **Keep planning** | Refuses, carrying the feedback field so the model revises rather than just being told no |
+
+The feedback field is optional and always there. Typing in it and pressing `↵`
+is the same as **Keep planning** with a reason — the deny message is the only
+channel the hook schema has for your words, and it is what makes "revise this"
+possible at all.
+
+### The notch, in tabs
+
+**Hover** the notch for the peek: what's playing, what's blocked, the shelf. It
+opens on its own after a moment and closes when you leave, and it never takes
+the keyboard — a hover surface that swallowed the next keystroke meant for your
+editor would be unforgivable.
+
+**Click** the notch for somewhere to look around: **Agents**, **Media**,
+**Tools**. `[` and `]` move between them, `⎋` closes. Media and Tools are
+doorways into the surfaces that were already there — mirror, reels, clipboard,
+voice notes, Snake, and the shelf with room to breathe rather than squeezed into
+a 136pt column.
+
+### Agents, and what a session mode actually does
+
+The Agents tab lists every Claude Code and Codex session from the last day, with
+what it's working on, its branch, and whether it's running, idle, or waiting on
+you. Nothing is asked of either agent to get this: their own local session logs
+in `~/.claude/projects` and `~/.codex/sessions` are read, and nothing is written
+back. It reads them **only while the tab is open** — the app still does nothing
+when it's idle.
+
+Each session carries a mode, and this is worth being exact about, because the
+name is borrowed from Claude Code and the mechanism is not:
+
+> **The mode does not change Claude Code's mode.** No hook can. The hook is
+> one-way — agent asks, notch answers — so what this actually sets is
+> **notch-911's own policy for answering that session's permission requests**.
+
+| Mode | What the notch does with that session's requests |
+| --- | --- |
+| **Manual** | Asks you every time. What the app has always done, and the default. |
+| **Accept edits** | Allows `Edit` / `Write` / `NotebookEdit` / `apply_patch` without asking. Everything else still asks. |
+| **Auto** | Allows every tool call, shell commands included, without showing you anything. |
+| **Plan** | Refuses anything that changes files, telling the model to propose a plan instead. Reads still pass. |
+
+Anything but **Manual** needs **Auto-answer by session mode** switched on in the
+status window, and it ships off. The switch is checked again at the moment a
+decision is made, not just where the control is drawn, so a mode left armed on a
+stale surface can't answer anything after you've turned it off. **Auto** asks
+for a second click before it engages.
+
+Two tools are never answered automatically, in any mode. `AskUserQuestion` is a
+question addressed to *you*, and an app that exists to put those in front of you
+has no business answering them. `ExitPlanMode` is worse in both directions:
+allowing it approves a plan nobody read, and denying it under Plan would wedge
+the session permanently, because a refused `ExitPlanMode` is a session that can
+never leave plan mode.
+
+Every automatic answer is written to the event log with the tool and the mode
+that decided it, and counted in that session's row. An engine that answers on
+your behalf and leaves no trace is indistinguishable from the app being broken.
+
+A session's mode is seeded from the mode it was observed running in, so it
+starts out agreeing with reality — except Claude Code's own `auto`, which is
+deliberately **not** inherited. That's a decision you made inside that session
+with its own confirmations; it should not quietly arm this app's most dangerous
+setting.
 
 ### Direct Codex answers
 
@@ -455,6 +533,11 @@ notch-911/
   PromptModels.swift               Generalised prompt model
   PromptCoordinator.swift          Prompt queue and resolution
   NotchPanel.swift                 The notch surface
+  NotchUI.swift                    Shared surface pieces: heading, chip, row, ink
+  TabsCard.swift                   Agents / Media / Tools
+  AgentSessions.swift              Session discovery from both agents' own logs
+  PermissionPolicy.swift           What a session mode answers, and what it never does
+  PlanCard.swift                   The ExitPlanMode surface
   StatusView.swift                 Status window
   MediaController.swift            Music / Spotify / YouTube Music
   FileShelf.swift                  Drag-in / drag-out shelf
@@ -474,7 +557,7 @@ notch-911/
   CodexAccessibilityBridge.swift   Accessibility submission
   CodeSignatureInspector.swift     Signing diagnostics
   UpdateChecker.swift              Daily GitHub Releases check + menu item
-notch-911Tests/                    Eleven suites
+notch-911Tests/                    Fourteen suites
 scripts/                           Signing identity, installer, release DMG, icon and backdrop generators
 docs/images/                       README assets
 ```

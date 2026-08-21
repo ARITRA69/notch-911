@@ -186,7 +186,7 @@ struct MirrorSurface: View {
 
     private var heading: some View {
         HStack(spacing: 4) {
-            Button { coordinator.backToPeek() } label: {
+            Button { coordinator.back() } label: {
                 Image(systemName: "chevron.left")
                     .frame(width: 16, height: 16)
                     .contentShape(Rectangle())

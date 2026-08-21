@@ -35,6 +35,7 @@ final class AppModel {
         case singleSelect = "Single select"
         case multiSelect = "Multi select"
         case freeText = "Free text"
+        case plan = "Plan"
 
         var id: String { rawValue }
     }
@@ -109,6 +110,26 @@ final class AppModel {
         }
     }
 
+    /// The switch that arms every permission policy but Manual.
+    ///
+    /// Off by default, and the most consequential thing in this list: with it
+    /// on, a session set to Accept edits or Auto has its tool calls answered
+    /// without the notch ever opening. That is exactly what was asked for — a
+    /// mode toggle that does something — and exactly why it is gated, logged,
+    /// and re-checked at the point of use rather than only at the control.
+    ///
+    /// Switching it off does not reset anyone's policy. The policies stay as
+    /// they were and simply stop applying, so flipping it back on doesn't mean
+    /// setting four sessions up again.
+    var autoAnswer: Bool {
+        didSet {
+            UserDefaults.standard.set(autoAnswer, forKey: PolicyStore.masterKey)
+            append(autoAnswer
+                   ? "auto-answer armed — sessions set to Accept edits, Auto or Plan answer without asking"
+                   : "auto-answer off — every permission asks in the notch")
+        }
+    }
+
     /// Codex isn't installed everywhere; don't offer to wire up something absent.
     let isCodexInstalled = CodexSettings.isCodexInstalled()
 
@@ -123,6 +144,7 @@ final class AppModel {
     @ObservationIgnored let shelf = ShelfStore()
     @ObservationIgnored let clipboard = ClipboardStore()
     @ObservationIgnored let voice = VoiceNoteStore()
+    @ObservationIgnored let sessions = AgentSessionStore()
     @ObservationIgnored private var clipboardHotkey: GlobalHotkey?
     @ObservationIgnored private var voiceHotkey: GlobalHotkey?
 
@@ -165,6 +187,8 @@ final class AppModel {
         clipboardCapture = UserDefaults.standard.bool(forKey: ClipboardStore.captureDefaultsKey)
         // Not registered: opt-in, so the unset-key false is exactly right.
         reels = UserDefaults.standard.bool(forKey: ReelsSession.enabledDefaultsKey)
+        // Same — and this is the one where the unset-key false matters most.
+        autoAnswer = UserDefaults.standard.bool(forKey: PolicyStore.masterKey)
     }
 
     var port: UInt16? {
@@ -194,12 +218,29 @@ final class AppModel {
             media: media,
             shelf: shelf,
             clipboard: clipboard,
-            voice: voice
+            voice: voice,
+            sessions: sessions
         )
         // Visibility is no longer just "is there a prompt": the collapsed mini
         // player has to keep the panel on screen whenever music is playing.
         coordinator.onVisibilityChange = { [weak self] _ in
-            self?.refreshPanelVisibility()
+            guard let self else { return }
+            refreshPanelVisibility()
+            // A session blocked on us has, by definition, written nothing since
+            // — so the scan can never see this and it has to come from the
+            // queue. This edge fires on every prompt arriving and every one
+            // being answered, which is exactly when the set changes.
+            var blocked = Set(coordinator.stranded.map(\.sessionId))
+            if let current = coordinator.current { blocked.insert(current.sessionId) }
+            blocked.remove("")
+            // Deliberately no rescan here: this callback also fires on every
+            // hover-peek, and a disk scan per hover is exactly the idle cost
+            // this app refuses to pay. `setWaiting` touches nothing but memory.
+            sessions.setWaiting(blocked)
+        }
+        coordinator.onPolicyChange = { [weak self] sessionID, policy in
+            PolicyStore.set(policy, for: sessionID)
+            self?.append("policy for \(sessionID.prefix(8)) → \(policy.title)")
         }
         coordinator.onPeekChange = { [weak self] active in
             self?.media.setPeekOpen(active)
@@ -370,6 +411,8 @@ final class AppModel {
 
         append("\(route.agent.displayName) · \(prompt.projectName): \(prompt.title.prefix(50))")
 
+        if let answered = policyAnswer(prompt, event: route.event) { return answered }
+
         guard let response = await coordinator.response(to: prompt),
               let body = response.body(for: route.event)
         else {
@@ -380,6 +423,42 @@ final class AppModel {
         }
 
         append("answered \(route.event.rawValue)")
+        return HookServer.Response(status: 200, body: body)
+    }
+
+    /// The session's policy, applied before anything reaches the notch.
+    ///
+    /// Returns a finished response when the policy decided, and `nil` when it
+    /// didn't — which is every case under Manual, and the only way the surface
+    /// ever opens. Placed here rather than inside the coordinator on purpose:
+    /// the coordinator's job starts at "show this to someone", and a call
+    /// answered by policy is never shown to anyone.
+    ///
+    /// Only `PermissionRequest` is in scope. An elicitation is a form and a
+    /// `Stop` is a question — neither is a permission, and "auto-allow" means
+    /// nothing for either.
+    private func policyAnswer(
+        _ prompt: Prompt,
+        event: HookEventKind
+    ) -> HookServer.Response? {
+        guard event == .permissionRequest, !prompt.sessionId.isEmpty else { return nil }
+
+        let policy = coordinator.policy(for: prompt.sessionId)
+        guard let decision = policy.decision(
+            forTool: prompt.toolName,
+            masterSwitch: autoAnswer
+        ) else { return nil }
+
+        let body = decision == .deny && policy == .plan
+            ? decision.responseBody(message: PermissionPolicy.planDenyMessage)
+            : decision.responseBody()
+
+        // Never silent. An engine that answers on your behalf and leaves no
+        // trace is indistinguishable from the app being broken.
+        append("\(decision.rawValue) \(prompt.toolName ?? "tool") in "
+               + "\(prompt.projectName) — \(policy.title), not asked")
+        sessions.noteAutoAnswer(sessionID: prompt.sessionId)
+
         return HookServer.Response(status: 200, body: body)
     }
 
@@ -682,6 +761,42 @@ final class AppModel {
                 receivedAt: Date()
             )
 
+        case .plan:
+            prompt = Prompt(
+                agent: agent,
+                event: .permissionRequest,
+                sessionId: UUID().uuidString,
+                cwd: FileManager.default.currentDirectoryPath,
+                title: "Ready to code?",
+                toolName: "ExitPlanMode",
+                summary: "",
+                kind: .plan(
+                    markdown: """
+                    ## Context
+
+                    The hover peek's chip row is out of width, so a click on the \
+                    notch opens a tabbed surface instead.
+
+                    ## Steps
+
+                    - Add `IdleSurface.tabs` and its five per-case policies
+                    - Build the Agents tab off the session scan
+                    - Give `ExitPlanMode` a card of its own
+
+                    ```swift
+                    case .plan(let markdown, let filePath):
+                        PlanCard(markdown: markdown, filePath: filePath)
+                    ```
+
+                    ---
+
+                    Verified with `xcodebuild test`.
+                    """,
+                    filePath: "/tmp/plans/tabbed-notch.md"
+                ),
+                receivedAt: Date()
+            )
+
         case .multiSelect:
             prompt = Prompt(
                 agent: agent,
@@ -750,6 +865,12 @@ final class AppModel {
             return values.isEmpty ? action.rawValue : "\(action.rawValue) \(values.keys.sorted())"
         case .text(let text):
             return text.isEmpty ? "end turn" : "reply: \(text.prefix(40))"
+        case .plan(.approve(let policy)):
+            return "plan approved · \(policy.title)"
+        case .plan(.keepPlanning(let feedback)):
+            return feedback.isEmpty
+                ? "keep planning"
+                : "keep planning: \(feedback.prefix(40))"
         }
     }
 

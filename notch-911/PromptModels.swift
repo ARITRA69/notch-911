@@ -115,6 +115,11 @@ nonisolated enum PromptKind: Sendable {
     case form([FormField])
     case freeText(placeholder: String)
     case externalQuestion
+    /// An `ExitPlanMode` call: the plan the model wrote, and the file it was
+    /// also written to. Its own kind rather than a `.permission` with a nicer
+    /// summary, because the answers differ — a plan is approved *into a mode*,
+    /// and "no" means "keep planning", not "denied".
+    case plan(markdown: String, filePath: String?)
 
     /// True when the surface contains a text field, which changes the keyboard
     /// map: bare digits would otherwise be swallowed by typing.
@@ -126,6 +131,11 @@ nonisolated enum PromptKind: Sendable {
         // assume a text field from the start.
         case .question: return true
         case .externalQuestion: return false
+        // The feedback field is always on screen, so bare digits would be
+        // swallowed by typing — the plan card puts its choices on 1/2/3 through
+        // `PlainKeyShortcut` for the same reason the permission card does, and
+        // both rely on this being right.
+        case .plan: return true
         case .form(let fields):
             return fields.contains {
                 switch $0.input {
@@ -147,6 +157,10 @@ nonisolated struct Prompt: Sendable, Identifiable {
     let cwd: String
     /// Tool name, or the elicitation/stop headline.
     let title: String
+    /// The raw tool name off the wire, when there was one. `title` can't stand
+    /// in for it — an `AskUserQuestion` leads with the question and a plan with
+    /// "Ready to code?" — and `PermissionPolicy` has to match on the real name.
+    var toolName: String? = nil
     /// One-line gist under the title. May be empty.
     let summary: String
     let kind: PromptKind
@@ -188,6 +202,23 @@ extension Prompt {
                 title = questions[0].question
                 summary = ""
                 kind = .question(questions)
+            } else if payload.toolName == "ExitPlanMode",
+                      // A JSON *string*, not `scalarString` — that coerces a
+                      // number to "123", and a plan that is a number is schema
+                      // drift, not a plan. Degrading to the generic card says
+                      // so honestly; rendering "123" as a plan would not.
+                      case .string(let plan)? = payload.toolInput?["plan"],
+                      !plan.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // The plan itself is the prompt. `ToolSummary.lead` has no key
+                // for this tool and would fall through to a JSON dump of the
+                // whole thing into a four-line box — see `PlanCard`.
+                title = "Ready to code?"
+                summary = ""
+                var planFile: String?
+                if case .string(let path)? = payload.toolInput?["planFilePath"] {
+                    planFile = path
+                }
+                kind = .plan(markdown: plan, filePath: planFile)
             } else {
                 title = payload.toolName ?? "Unknown tool"
                 summary = ToolSummary.lead(tool: payload.toolName, input: payload.toolInput)
@@ -230,6 +261,7 @@ extension Prompt {
             sessionId: payload.sessionId ?? "unknown",
             cwd: payload.cwd ?? "",
             title: title,
+            toolName: payload.toolName,
             summary: summary,
             kind: kind,
             receivedAt: Date(),
@@ -297,8 +329,20 @@ nonisolated enum FormAction: String, Sendable {
     case accept, decline, cancel
 }
 
+/// What the user did with a plan.
+///
+/// `.approve` carries the mode they approved *into*: Claude Code's own picker
+/// offers "auto-accept edits" and "manually approve edits" as two different
+/// yesses, and answering only "yes" would drop the half of the answer the user
+/// actually thought about.
+nonisolated enum PlanDecision: Sendable, Equatable {
+    case approve(policy: PermissionPolicy)
+    case keepPlanning(feedback: String)
+}
+
 nonisolated enum PromptResponse: Sendable {
     case permission(PermissionDecision)
+    case plan(PlanDecision)
     /// Answers to an `AskUserQuestion` call, one per question.
     case answers([AskAnswer])
     case form(action: FormAction, values: [String: JSONValue])
@@ -319,6 +363,21 @@ nonisolated enum PromptResponse: Sendable {
         // call was refused, and the model reads it as the user's answer.
         case (.permissionRequest, .answers(let answers)):
             return PermissionDecision.deny.responseBody(message: AskAnswer.denyMessage(answers))
+
+        // Approving a plan is an ordinary allow; the mode it was approved into
+        // is this app's business and never reaches the wire. Keeping planning
+        // is a deny, and the feedback rides the deny message — the one channel
+        // the schema has for a user's words, as `AskAnswer.denyMessage` already
+        // uses.
+        case (.permissionRequest, .plan(let decision)):
+            switch decision {
+            case .approve:
+                return PermissionDecision.allow.responseBody()
+            case .keepPlanning(let feedback):
+                return PermissionDecision.deny.responseBody(
+                    message: PlanDecision.keepPlanningMessage(feedback)
+                )
+            }
 
         case (.elicitation, .form(let action, let values)):
             var output: [String: Any] = [
@@ -346,6 +405,22 @@ nonisolated enum PromptResponse: Sendable {
         default:
             return nil
         }
+    }
+}
+
+extension PlanDecision {
+    /// Worded as a next instruction rather than a refusal, for the reason
+    /// `AskAnswer.denyMessage` gives: a bare "denied" invites the model to
+    /// propose the same plan again.
+    nonisolated static func keepPlanningMessage(_ feedback: String) -> String {
+        let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lead = "The user chose to keep planning in the notch (notch-911) instead of the "
+            + "session picker. Do not start implementing."
+        guard !trimmed.isEmpty else {
+            return lead + " Revise the plan and present it again."
+        }
+        return lead + " This is what they want changed — revise the plan accordingly "
+            + "and present it again:\n\n" + trimmed
     }
 }
 

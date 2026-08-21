@@ -115,6 +115,7 @@ struct SnakeGameTests {
         case .reels: coordinator.openReels()
         case .voice: coordinator.openVoice()
         case .mirror: coordinator.openMirror()
+        case .tabs: coordinator.openTabs()
         case .peek, .none: break
         }
         guard surface != .peek else { return }

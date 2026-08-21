@@ -95,6 +95,8 @@ struct StatusView: View {
             if let error = model.setupError { errorBox(error) }
 
             card {
+                autoAnswerRow
+                Divider().padding(.leading, 14)
                 stopRow
                 Divider().padding(.leading, 14)
                 youTubeMusicRow
@@ -334,6 +336,24 @@ struct StatusView: View {
     /// This also gives the hotkey somewhere to report from — a chord another app
     /// already owns registers successfully and then never fires, so "it's on" is
     /// worth stating rather than assuming.
+    /// The switch that makes the notch's per-session modes do anything.
+    ///
+    /// First in the card because it is the one setting here that can cause the
+    /// app to act *instead of* asking — everything else below it changes what
+    /// gets shown.
+    private var autoAnswerRow: some View {
+        toggleRow(
+            isOn: $model.autoAnswer,
+            title: "Auto-answer by session mode",
+            detail: "Lets the per-session mode in the notch's Agents tab answer permission "
+                + "requests for you: Accept edits allows file edits, Auto allows every tool "
+                + "call including shell commands, Plan refuses anything that changes files. "
+                + "Sessions left on Manual always ask, and plan approvals and questions for "
+                + "you are never answered automatically. Every automatic answer is listed "
+                + "under Events."
+        )
+    }
+
     private var reelsRow: some View {
         toggleRow(
             isOn: $model.reels,

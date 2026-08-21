@@ -70,7 +70,7 @@ struct VoiceSurface: View {
             // happening, and the way out of this surface is one of its own three
             // answers — or clicking the notch again to go back to the indicator.
             if !store.isBusy {
-                Button { coordinator.backToPeek() } label: {
+                Button { coordinator.back() } label: {
                     Image(systemName: "chevron.left")
                         .frame(width: 16, height: 16)
                         .contentShape(Rectangle())

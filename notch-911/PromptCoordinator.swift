@@ -36,6 +36,11 @@ nonisolated enum IdleSurface: Sendable, Equatable, CaseIterable {
     /// the game, and the only surface here that reaches a third-party account —
     /// so it is opt-in, and has no hotkey either.
     case reels
+    /// Agents, Media and Tools. Opened by *clicking* the notch, which until now
+    /// meant nothing unless a note was recording. Deliberately not reachable by
+    /// hover: the peek is the glance, and a hover that landed you in a session
+    /// list with a mode control in it would be a surface nobody asked for.
+    case tabs
     case none
 }
 
@@ -46,7 +51,12 @@ extension IdleSurface {
     /// re-summon with a keystroke, and the game pauses exactly where it stood.
     /// The reels are the one surface the user is *inside* — a scroll position
     /// and a playing video — that this app, rather than the user, interrupts.
-    var survivesPreemption: Bool { self == .reels }
+    /// The tabs join the reels here on a different argument. The reels are a
+    /// surface you are *inside*; the tabs are one you *asked for* — a click,
+    /// not a hover — and answering a prompt that interrupted it should hand it
+    /// back rather than collapse to nothing. The peek can never qualify on
+    /// either count: it opens on its own.
+    var survivesPreemption: Bool { self == .reels || self == .tabs }
 }
 
 nonisolated enum ExternalSubmissionState: Sendable, Equatable {
@@ -101,6 +111,13 @@ final class PromptCoordinator {
     /// stop at the start of that window rather than the end of it.
     var isGameLive: Bool { current == nil && idleSurface == .game }
 
+    /// True only while the Agents tab is genuinely the thing on the notch. The
+    /// session scan keys off this and nothing else: it reads the disk, and this
+    /// app does nothing when idle.
+    var isAgentsTabLive: Bool {
+        current == nil && idleSurface == .tabs && selectedTab == .agents
+    }
+
     /// Surfaces allowed to take the keyboard. A peek never may: it opens on
     /// hover alone, and swallowing the next keystroke meant for the user's
     /// editor is the one unforgivable thing a hover surface can do.
@@ -111,6 +128,7 @@ final class PromptCoordinator {
             || idleSurface == .voice
             || idleSurface == .mirror
             || idleSurface == .reels
+            || idleSurface == .tabs
     }
 
     /// Fires as the peek opens and closes, so pollers can run only while the
@@ -126,6 +144,25 @@ final class PromptCoordinator {
     /// same way `agentStatus` is. The peek has to decide whether to draw the
     /// chip, and the coordinator has no business reading `UserDefaults` itself.
     var reelsEnabled = false
+
+    /// Which tab the tabbed surface is on. Held here rather than in the card's
+    /// own `@State` so it outlives the collapse: the content stays mounted for
+    /// 800ms after the surface closes and is then torn down, which would put
+    /// view state back to `.agents` every time.
+    private(set) var selectedTab: NotchTab = .agents
+
+    /// Per-session permission policy, mirrored out of `PolicyStore` so the UI
+    /// observes it. `UserDefaults` publishes nothing SwiftUI can watch, and a
+    /// mode control that doesn't redraw when you press it is not a control.
+    ///
+    /// Lazily filled: a session's entry appears the first time anything asks
+    /// for it, seeded from what that session was actually doing.
+    private(set) var policies: [String: PermissionPolicy] = [:]
+
+    /// Fires when a policy changes, so `AppModel` can persist it and note it in
+    /// the log. Same shape as `onPeekChange` and `onVisibilityChange` — the
+    /// coordinator tells the app model, never the other way round.
+    @ObservationIgnored var onPolicyChange: ((String, PermissionPolicy) -> Void)?
 
     /// Dwell before the peek opens.
     static let peekDelayMilliseconds = 300
@@ -271,6 +308,14 @@ final class PromptCoordinator {
     // MARK: UI side
 
     func resolve(_ prompt: Prompt, with response: PromptResponse) {
+        // Approving a plan carries the mode it was approved *into*, and that
+        // half of the answer is this app's to keep. Applied here rather than in
+        // the card so it happens on every route into `resolve` — including the
+        // keyboard shortcut — and before the continuation resumes, so the very
+        // next permission from this session already sees the new policy.
+        if case .plan(.approve(let policy)) = response, !prompt.sessionId.isEmpty {
+            setPolicy(policy, for: prompt.sessionId)
+        }
         guard let continuation = continuations.removeValue(forKey: prompt.id) else {
             guard externalPromptIDs.remove(prompt.id) != nil else { return }
             if let externalID = prompt.externalID {
@@ -373,6 +418,13 @@ final class PromptCoordinator {
     private func setIdleSurface(_ surface: IdleSurface) {
         let previous = idleSurface
         let wasPeeking = previous == .peek
+        // 5. `returnSurface` is recorded here for the same reason as (4): one
+        //    writer. A drill-down entered from a hub remembers that hub; one
+        //    entered from nothing — ⇧⌘V over another app — falls back to the
+        //    peek, which is where ← has always gone.
+        if surface != previous, surface != .peek, surface != .tabs, surface != .none {
+            returnSurface = (previous == .tabs) ? .tabs : .peek
+        }
         idleSurface = surface
         if current != nil {
             // Only the *first* prompt in a queue leaves a memo. The second
@@ -445,14 +497,23 @@ final class PromptCoordinator {
     /// one is showing.
     @ObservationIgnored var voiceIsCapturing = false
 
-    /// A click on the notch itself, delivered by the hover sensor. Only means
-    /// anything mid-note: the collapsed indicator *is* the control, and this is
-    /// the way to Discard / Pause / Save. Toggles, so clicking it again puts the
-    /// note back to just the indicator rather than stranding the panel open.
+    /// A click on the notch itself, delivered by the hover sensor.
+    ///
+    /// Mid-note it still means what it always did: the collapsed indicator *is*
+    /// the control, and this is the way to Discard / Pause / Save. A recording
+    /// keeps the click for itself — the one control you have over a live mic
+    /// must not become a way to open a session list.
+    ///
+    /// Otherwise it opens the tabs. Both cases toggle, so a second click puts
+    /// the surface away rather than stranding the panel open.
     func tappedSensor() {
-        guard voiceIsCapturing, current == nil else { return }
+        guard current == nil else { return }
         dwell?.cancel()
-        setIdleSurface(idleSurface == .voice ? .none : .voice)
+        if voiceIsCapturing {
+            setIdleSurface(idleSurface == .voice ? .none : .voice)
+            return
+        }
+        setIdleSurface(idleSurface == .tabs ? .none : .tabs)
     }
 
     /// `esc` while idle, and the panel losing key. A live recording is stopped
@@ -500,13 +561,20 @@ final class PromptCoordinator {
         setIdleSurface(.none)
     }
 
-    /// The ← in the clipboard heading — hand the surface back to the peek
-    /// rather than collapsing. The pointer latch is deliberately left alone:
-    /// no enter event was delivered while the clipboard owned the surface, so
-    /// a latch set here would have no guaranteed exit to clear it. Instead the
-    /// peek is marked as awaiting the pointer, which suspends hover-to-close
-    /// until the user actually reaches it — see `peekAwaitsPointer`.
-    func backToPeek() {
+    /// Where a ← should land. Set whenever a surface is opened, so "back" means
+    /// the place the user actually came from: the peek if they used a chip, the
+    /// tabs if they used a launcher. Without this, drilling into the clipboard
+    /// from the Tools tab and pressing ← would drop them somewhere they had not
+    /// been.
+    @ObservationIgnored private var returnSurface: IdleSurface = .peek
+
+    /// The ← in every surface heading — hand the surface back rather than
+    /// collapsing. The pointer latch is deliberately left alone: no enter event
+    /// was delivered while the other surface owned it, so a latch set here would
+    /// have no guaranteed exit to clear it. Instead the peek is marked as
+    /// awaiting the pointer, which suspends hover-to-close until the user
+    /// actually reaches it — see `peekAwaitsPointer`.
+    func back() {
         guard idleSurface == .clipboard
                 || idleSurface == .game
                 || idleSurface == .voice
@@ -515,8 +583,9 @@ final class PromptCoordinator {
             return
         }
         dwell?.cancel()
-        peekAwaitsPointer = true
-        setIdleSurface(.peek)
+        // Only the peek needs the hold; the tabs never close on pointer exit.
+        if returnSurface == .peek { peekAwaitsPointer = true }
+        setIdleSurface(returnSurface)
     }
 
     /// `esc`, a click outside, and copying an item.
@@ -527,6 +596,47 @@ final class PromptCoordinator {
         // pointer still over the notch — the same reasoning as `advance()`:
         // re-opening into a surface the user didn't ask for reads as a glitch.
         setIdleSurface(.none)
+    }
+
+    // MARK: Tabs
+
+    /// A click on the notch, and the ⌘-less way into everything that used to
+    /// live in the peek's chip row.
+    func openTabs() {
+        guard current == nil, idleSurface != .tabs else { return }
+        dwell?.cancel()
+        setIdleSurface(.tabs)
+    }
+
+    /// `esc`, the close button, and the panel losing key.
+    func closeTabs() {
+        guard idleSurface == .tabs else { return }
+        dwell?.cancel()
+        setIdleSurface(.none)
+    }
+
+    func selectTab(_ tab: NotchTab) {
+        selectedTab = tab
+    }
+
+    // MARK: Policy
+
+    /// This session's policy, seeded on first ask from the mode the session was
+    /// observed running in. Seeding rather than defaulting matters: a session
+    /// already in `acceptEdits` that showed up here as "Manual" would read as
+    /// this app having reset something.
+    func policy(for sessionID: String, observedMode: String? = nil) -> PermissionPolicy {
+        if let known = policies[sessionID] { return known }
+        let seeded = PolicyStore.policy(for: sessionID)
+            ?? PermissionPolicy.seed(fromObservedMode: observedMode)
+        policies[sessionID] = seeded
+        return seeded
+    }
+
+    func setPolicy(_ policy: PermissionPolicy, for sessionID: String) {
+        guard policies[sessionID] != policy else { return }
+        policies[sessionID] = policy
+        onPolicyChange?(sessionID, policy)
     }
 
     // MARK: Hover peek
@@ -653,7 +763,13 @@ final class PromptCoordinator {
             // finishing the interruption rather than starting something.
             // `current` is cleared first so `setIdleSurface` sees the user, not
             // a prompt, and retires the memo on its own.
-            let restored: IdleSurface = reelsEnabled ? preemptedSurface : .none
+            // The reels restore is gated on the feature still being on; the
+            // tabs have no such switch to go stale against, so gating them on
+            // `reelsEnabled` would make a setting about Instagram decide
+            // whether a session list comes back.
+            let restored: IdleSurface = (preemptedSurface == .reels && !reelsEnabled)
+                ? .none
+                : preemptedSurface
             dwell?.cancel()
             setIdleSurface(restored)
         } else {

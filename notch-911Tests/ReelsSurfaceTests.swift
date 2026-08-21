@@ -51,9 +51,11 @@ struct ReelsSurfaceTests {
 
     // MARK: Which surfaces come back
 
-    @Test("Only the reels survive being preempted", arguments: IdleSurface.allCases)
+    @Test("Only surfaces the user asked for survive being preempted", arguments: IdleSurface.allCases)
     func survivesPreemption(_ surface: IdleSurface) {
-        #expect(surface.survivesPreemption == (surface == .reels))
+        // The tabs join the reels: both are surfaces the user asked for, so a
+        // prompt interrupting either is this app's doing and gets undone.
+        #expect(surface.survivesPreemption == (surface == .reels || surface == .tabs))
     }
 
     /// Guards the allowlist at `wantsKeyboard`. Adding a case to `IdleSurface`
@@ -70,6 +72,7 @@ struct ReelsSurfaceTests {
         case .reels: coordinator.openReels()
         case .voice: coordinator.openVoice()
         case .mirror: coordinator.openMirror()
+        case .tabs: coordinator.openTabs()
         case .peek, .none: break
         }
         guard surface != .peek else { return }
@@ -181,7 +184,7 @@ struct ReelsSurfaceTests {
         coordinator.openReels()
         // Walking back to the peek is the user closing the reels, not a prompt
         // taking them — so nothing should come back later.
-        coordinator.backToPeek()
+        coordinator.back()
         #expect(coordinator.idleSurface == .peek)
 
         let prompt = makePrompt("Bash")

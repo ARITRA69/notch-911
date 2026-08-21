@@ -142,7 +142,7 @@ struct ClipboardCard: View {
             // Back to the peek, mirroring the chip that led here. Shown even
             // when the surface was opened by ⇧⌘V — the peek is the idle hub,
             // so "back" always has somewhere sensible to go.
-            Button { coordinator.backToPeek() } label: {
+            Button { coordinator.back() } label: {
                 Image(systemName: "chevron.left")
                     // The glyph alone is a ~6pt target at the corner of the
                     // panel; pad the hit area without moving the layout.

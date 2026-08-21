@@ -115,7 +115,8 @@ final class NotchPanelController: NSObject {
         media: MediaMonitor,
         shelf: ShelfStore,
         clipboard: ClipboardStore,
-        voice: VoiceNoteStore
+        voice: VoiceNoteStore,
+        sessions: AgentSessionStore
     ) {
         self.coordinator = coordinator
         self.media = media
@@ -170,7 +171,8 @@ final class NotchPanelController: NSObject {
                 media: media,
                 shelf: shelf,
                 clipboard: clipboard,
-                voice: voice
+                voice: voice,
+                sessions: sessions
             )
         )
         hosting.frame = CGRect(origin: .zero, size: Self.panelSize)
@@ -318,6 +320,10 @@ extension NotchPanelController: NSWindowDelegate {
         MainActor.assumeIsolated {
             switch coordinator.idleSurface {
             case .clipboard: coordinator.closeClipboard()
+            // The same "never mind": the tabs are a place you went, and going
+            // somewhere else is how you leave. Nothing is lost — the selected
+            // tab lives on the coordinator, so reopening lands where you were.
+            case .tabs: coordinator.closeTabs()
             // Same reasoning, and no loss: the game object outlives the
             // surface, so reopening resumes the stage mid-roll.
             case .game: coordinator.closeGame()
@@ -473,6 +479,7 @@ struct NotchPromptView: View {
     let shelf: ShelfStore
     let clipboard: ClipboardStore
     let voice: VoiceNoteStore
+    let sessions: AgentSessionStore
 
     /// What the surface is rendering. Held in view state rather than read
     /// straight from the coordinator so the content outlives the collapse:
@@ -542,6 +549,14 @@ struct NotchPromptView: View {
     private static let voiceOptionsWidth: CGFloat = 380
     /// Derived the same way, from the web view's own width.
     private static let reelsWidth: CGFloat = ReelsSession.webWidth + 32
+    /// Wide enough for a session row to carry a project, a branch, a state and a
+    /// mode without any of them truncating, and for the Tools tab to put the
+    /// shelf's fixed 136pt beside a column of launchers — which is exactly what
+    /// the peek's 540 could not do. 600 plus the flares is 624, inside the
+    /// fixed 720pt panel (§6.2 — the window is never resized, so the ceiling is
+    /// hard). It does cost shadow: `shadowRadius` clamps against the leftover
+    /// width, so this surface wears a tighter one than the peek.
+    private static let tabsWidth: CGFloat = 600
     /// Roughly the physical notch's own bottom corner radius.
     private static let notchBottomRadius: CGFloat = 10
     private static let openBottomRadius: CGFloat = 22
@@ -590,6 +605,7 @@ struct NotchPromptView: View {
         else if shownIdle == .voice { content = voice.isBusy ? Self.voiceOptionsWidth : Self.voiceWidth }
         else if shownIdle == .mirror { content = Self.mirrorWidth }
         else if shownIdle == .reels { content = Self.reelsWidth }
+        else if shownIdle == .tabs { content = Self.tabsWidth }
         else { content = Self.peekWidth }
         return content + Self.flare * 2
     }
@@ -679,6 +695,7 @@ struct NotchPromptView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: coordinator.current?.id) { _, _ in sync() }
         .onChange(of: coordinator.idleSurface) { _, _ in sync() }
+        .onChange(of: coordinator.selectedTab) { _, _ in sync() }
         // Switching the feature off should actually reclaim the WebContent
         // process, not leave it parked with a logged-in Instagram in it. The
         // coordinator has already closed the surface by the time this arrives.
@@ -830,11 +847,33 @@ struct NotchPromptView: View {
     private var content: some View {
         Group {
             if let prompt = shownPrompt {
-                PromptCard(prompt: prompt, coordinator: coordinator)
-                    // Fresh identity per prompt, so every field, selection and
-                    // focus state resets when the queue advances rather than
-                    // bleeding the last answer into the next question.
+                // A plan is approved *into a mode* and refused by asking for a
+                // revision, so it gets its own card rather than a prettier
+                // allow/deny. Same fresh identity per prompt.
+                if case .plan(let markdown, let filePath) = prompt.kind {
+                    PlanCard(
+                        prompt: prompt,
+                        markdown: markdown,
+                        filePath: filePath,
+                        coordinator: coordinator
+                    )
                     .id(prompt.id)
+                } else {
+                    PromptCard(prompt: prompt, coordinator: coordinator)
+                        // Fresh identity per prompt, so every field, selection
+                        // and focus state resets when the queue advances rather
+                        // than bleeding the last answer into the next question.
+                        .id(prompt.id)
+                }
+            } else if shownIdle == .tabs {
+                TabsCard(
+                    coordinator: coordinator,
+                    sessions: sessions,
+                    media: media,
+                    shelf: shelf,
+                    clipboard: clipboard,
+                    voice: voice
+                )
             } else if shownIdle == .game, let snake {
                 SnakeSurface(coordinator: coordinator, game: snake)
             } else if shownIdle == .voice {
@@ -918,6 +957,11 @@ struct NotchPromptView: View {
         // collapse, so `esc` mid-run could steer the snake into a wall after it
         // had left the screen and bank the worse score.
         snake?.setRunning(coordinator.isGameLive)
+        // Same edge, same reason: the session scan touches the disk, and the
+        // app is supposed to do nothing when idle. Only the Agents tab, not the
+        // whole tabbed surface — reading Media or Tools is not a reason to
+        // start listing transcripts.
+        sessions.setVisible(coordinator.isAgentsTabLive)
 
         if let prompt = coordinator.current {
             shownPrompt = prompt
@@ -960,6 +1004,10 @@ struct NotchPromptView: View {
             // of this function ran against a nil session. Idempotent after that.
             reels?.setLive(true)
             setIdleContent(.reels)
+            expandOnceMeasured()
+        case .tabs:
+            shownPrompt = nil
+            setIdleContent(.tabs)
             expandOnceMeasured()
         case .clipboard:
             shownPrompt = nil
@@ -1541,7 +1589,12 @@ struct PromptCard: View {
     @ViewBuilder
     private var content: some View {
         switch prompt.kind {
-        case .permission:
+        // A plan is routed to `PlanCard` before this card is ever built, so
+        // these five `.plan` branches are unreachable today. They degrade to
+        // the permission behaviour rather than trapping: if that routing ever
+        // changes, the worst case should be a plain card that still unblocks
+        // the session, not a crash that leaves it hanging on the socket.
+        case .permission, .plan:
             EmptyView()
 
         case .question(let questions):
@@ -1999,7 +2052,7 @@ struct PromptCard: View {
     private var actions: some View {
         HStack(spacing: 8) {
             switch prompt.kind {
-            case .permission:
+            case .permission, .plan:
                 choice("Allow", shortcut: "1", emphasis: 1.0) {
                     coordinator.resolve(prompt, with: .permission(.allow))
                 }
@@ -2091,7 +2144,7 @@ struct PromptCard: View {
 
     private func submit() {
         switch prompt.kind {
-        case .permission:
+        case .permission, .plan:
             coordinator.resolve(prompt, with: .permission(.allow))
         case .question:
             submitAskAnswers()
@@ -2219,7 +2272,7 @@ struct PromptCard: View {
         switch prompt.kind {
         case .freeText: return "End turn"
         case .externalQuestion: return "Dismiss"
-        case .permission, .question, .form: return "Later"
+        case .permission, .question, .form, .plan: return "Later"
         }
     }
 
@@ -2373,7 +2426,7 @@ struct PromptCard: View {
                 default: return false
                 }
             }?.id
-        case .permission, .question, .externalQuestion: return nil
+        case .permission, .question, .externalQuestion, .plan: return nil
         }
     }
 }
@@ -2423,20 +2476,6 @@ private struct SpinningDisc: View {
 
 // MARK: - Shortcut modifiers
 
-/// `keyboardShortcut` takes a non-optional key, so the optional cases need a
-/// modifier rather than an inline conditional.
-private struct PlainKeyShortcut: ViewModifier {
-    let key: Character?
-
-    func body(content: Content) -> some View {
-        if let key {
-            content.keyboardShortcut(KeyEquivalent(key), modifiers: [])
-        } else {
-            content
-        }
-    }
-}
-
 private struct OptionShortcut: ViewModifier {
     let index: Int?
     let needsCommand: Bool
@@ -2454,14 +2493,3 @@ private extension Character {
     var asKeyEquivalent: KeyEquivalent? { KeyEquivalent(self) }
 }
 
-private extension Agent {
-    /// Claude Code answers in its own orange; Codex stays neutral. That the two
-    /// look different is the point — with both connectors live, the colour is a
-    /// pre-attentive tell of which agent you're about to unblock.
-    var accent: Color? {
-        switch self {
-        case .claudeCode: return Color(red: 0.851, green: 0.467, blue: 0.341)
-        case .codex: return nil
-        }
-    }
-}
